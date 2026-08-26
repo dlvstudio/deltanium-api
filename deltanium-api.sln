@@ -1,0 +1,30 @@
+﻿Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.5.2.0
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "deltanium-api", "deltanium-api.csproj", "{3A70A5DE-F2EB-F57B-9603-3B73B325AC50}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "deltanium-api.Tests", "deltanium-api.Tests\deltanium-api.Tests.csproj", "{5E772E59-2DA6-4F3C-8341-731188A5991E}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{3A70A5DE-F2EB-F57B-9603-3B73B325AC50}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{3A70A5DE-F2EB-F57B-9603-3B73B325AC50}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{3A70A5DE-F2EB-F57B-9603-3B73B325AC50}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{3A70A5DE-F2EB-F57B-9603-3B73B325AC50}.Release|Any CPU.Build.0 = Release|Any CPU
+		{5E772E59-2DA6-4F3C-8341-731188A5991E}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{5E772E59-2DA6-4F3C-8341-731188A5991E}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{5E772E59-2DA6-4F3C-8341-731188A5991E}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{5E772E59-2DA6-4F3C-8341-731188A5991E}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {B65C3F64-728B-45CD-9A80-9977D1DC1122}
+	EndGlobalSection
+EndGlobal

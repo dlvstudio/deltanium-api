@@ -1,0 +1,6 @@
+@deltanium_api_HostAddress = http://localhost:5073
+
+GET {{deltanium_api_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

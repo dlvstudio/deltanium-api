@@ -1,0 +1,21 @@
+obj/
+bin/
+logs/
+TestResults/
+
+# Runtime data and secrets — generated locally, never commit
+users.json
+user_follows.json
+user_rekeys.json
+chat_messages.json
+conversations.json
+online_sessions.json
+signaling_messages.json
+stored_files.json
+transactions.json
+nodes.json
+blockcreator_nodes.json
+vouchers.json
+central_keys.json
+
+.DS_Store
