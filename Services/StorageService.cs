@@ -9,7 +9,7 @@ using NBitcoin;
 
 namespace DeltaniumApi.Services
 {
-    public class StorageService
+    public class StorageService : IStorageService
     {
         private readonly string _usersFilePath = "users.json";
         private readonly string _nodesFilePath = "nodes.json";
@@ -273,13 +273,25 @@ namespace DeltaniumApi.Services
 
         public async Task MarkVoucherUsedAsync(string code)
         {
+            await TryMarkVoucherUsedAsync(code);
+        }
+
+        public async Task<bool> TryMarkVoucherUsedAsync(string code)
+        {
             var vouchers = await GetVouchersAsync();
-            var voucher = vouchers.FirstOrDefault(v => v.Code == code);
-            if (voucher != null)
-            {
-                voucher.Used = true;
-                await File.WriteAllTextAsync(_vouchersFilePath, JsonConvert.SerializeObject(vouchers, Formatting.Indented));
-            }
+            var voucher = vouchers.FirstOrDefault(v => v.Code == code && !v.Used);
+            if (voucher == null) return false;
+            voucher.Used = true;
+            await File.WriteAllTextAsync(_vouchersFilePath, JsonConvert.SerializeObject(vouchers, Formatting.Indented));
+            return true;
+        }
+
+        public async Task SaveStoredFilesBatchAsync(List<StoredFile> files)
+        {
+            if (files == null || files.Count == 0) return;
+            var existing = await GetStoredFilesAsync();
+            existing.AddRange(files);
+            await File.WriteAllTextAsync(_storedFilesPath, JsonConvert.SerializeObject(existing, Formatting.Indented));
         }
 
         // User Follow Methods

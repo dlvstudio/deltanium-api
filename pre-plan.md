@@ -17,8 +17,8 @@
 
 - Posting (author A)
   1. Generate K, encrypt content blocks: Enc_K(content).
-  2. Encapsulate K into PRE bundle B_A^t(K): includes [capsule, ciphertext(K), pk_A]. Note: rust-umbral currently does not bind "tag" at the crypto layer; tag/epoch will be enforced at the policy/token layer.
-  3. Store base64(PRE bundle) in metadata `encryptedKey` (along with the tag fields below).
+  2. Encapsulate K thành PRE bundle B_A^t(K): gồm [capsule, ciphertext(K), pk_A]. Lưu ý: rust-umbral hiện không bind "tag" ở tầng crypto; tag/epoch sẽ được cưỡng chế ở tầng policy/token.
+  3. Lưu base64(PRE bundle) vào metadata `encryptedKey` (kèm các tag fields bên dưới).
 
 - Reading (follower B)
   - Proxy flow (recommended):
@@ -36,12 +36,12 @@
 
 #### 2.1 App Post Metadata (when Option 2 is selected)
 - Existing fields retained; add and reinterpret as follows:
-- `encryptedKey` (string, base64): holds PRE bundle B_A^t(K) consisting of [capsule, ciphertext(K), authorPublicKey].
+- `encryptedKey` (string, base64): mang PRE bundle B_A^t(K) gồm [capsule, ciphertext(K), authorPublicKey].
   - `capsuleFor` (string): "tag".
   - `policyTag` (string): e.g., "followers:2025".
   - `policyScheme` (string): "CPRE".
 
-Example snippet stored in metadata JSON (contains PRE bundle base64 in `encryptedKey`):
+Example snippet stored in metadata JSON (chứa PRE bundle base64 trong `encryptedKey`):
 ```json
 {
   "type": "post",
@@ -97,10 +97,10 @@ Example snippet stored in metadata JSON (contains PRE bundle base64 in `encrypte
   - Headers: X-User-PubKey = pk_B, X-Timestamp, X-Signature (existing signing pattern)
   - Body: { fileId: string, policyTag: string, token?: string }
   - Steps:
-    1) Load metadata; verify `CapsuleFor=="tag"` and `PolicyTag` matches the request.
-    2) Validate entitlement via Central (use `token` or call Central with B's PoP to obtain a short-lived token/rk). Enforce tag/epoch at the policy layer.
-    3) Transform PRE bundle: B_A^t(K) → B_B(K) (append verifying_pk + cfrag after re-encrypt). Do not decrypt plaintext.
-    4) Return { encryptedKeyForB: base64(transformed PRE bundle) }.
+    1) Load metadata; verify `CapsuleFor=="tag"` và `PolicyTag` trùng request.
+    2) Validate entitlement qua Central (dùng `token` hoặc tự gọi Central với PoP của B để lấy token/rk tạm thời). Cưỡng chế tag/epoch ở tầng policy.
+    3) Transform PRE bundle: B_A^t(K) → B_B(K) (append verifying_pk + cfrag sau khi re-encrypt). Không giải plaintext.
+    4) Return { encryptedKeyForB: base64(PRE bundle đã transform) }.
 
 #### 3.3 Store feeds (existing)
 - `/api/post/followers-feed`: include posts with `shareType = "followers"` regardless of presence of `RecipientPubKey`. Returns both Option 1 and Option 2 posts; client chooses decrypt path.
@@ -123,8 +123,8 @@ Example snippet stored in metadata JSON (contains PRE bundle base64 in `encrypte
 #### 4.3 Reading (followers feed)
 - When `capsuleFor != "tag"`: use existing per‑recipient flow (Option 1).
 - When `capsuleFor == "tag"`:
-  - Proxy flow (preferred): call Store `/api/pre/reencrypt` with (fileId, policyTag). Receive `encryptedKeyForB` (transformed PRE bundle); decapsulate with sk_B → K; decrypt blocks.
-  - Client flow (fallback): call Central `/api/policy/fetch-rekey` with PoP; receive rk (short-lived scope); transform bundle locally; decapsulate → K; decrypt blocks.
+  - Proxy flow (preferred): gọi Store `/api/pre/reencrypt` với (fileId, policyTag). Nhận `encryptedKeyForB` (PRE bundle đã transform); decapsulate với sk_B → K; decrypt blocks.
+  - Client flow (fallback): gọi Central `/api/policy/fetch-rekey` với PoP; nhận rk (scope ngắn hạn); transform bundle local; decapsulate → K; decrypt blocks.
 
 #### 4.4 New App Services
 - PreService (new facade in app):
@@ -142,7 +142,7 @@ Example snippet stored in metadata JSON (contains PRE bundle base64 in `encrypte
 4) bundle ← EncapsulateWithTag(pk_A, t, K) → PRE bundle B_A^t(K) = [capsule,ciphertext(K),pk_A]
 5) metadata.encryptedKey ← base64(bundle)
 6) metadata.capsuleFor ← "tag"; metadata.policyTag ← t; metadata.policyScheme ← "CPRE"
-7) Upload metadata and blocks (same as the current pipeline).
+7) Upload metadata and blocks (như pipeline hiện tại).
 
 #### 5.2 Follow event (A→B)
 1) On A's device: rk ← ReKey(sk_A, pk_B, tag=t[, context])
@@ -150,20 +150,20 @@ Example snippet stored in metadata JSON (contains PRE bundle base64 in `encrypte
 
 #### 5.3 Read post (B)
 Proxy (preferred):
-1) B fetches the feed; sees tag t in metadata.
-2) B PoP (signs nonce). Store authenticates via Central, transforms PRE bundle: B_A^t(K) → B_B(K) (append verifying_pk + cfrag).
-3) B decapsulates with sk_B → K; decrypts blocks.
+1) B lấy feed; thấy tag t trong metadata.
+2) B PoP (ký nonce). Store xác thực qua Central, transform PRE bundle: B_A^t(K) → B_B(K) (append verifying_pk + cfrag).
+3) B decapsulates với sk_B → K; decrypt blocks.
 
 Client (fallback):
-1) B obtains rk from Central after PoP (short-lived rk, scoped by tag[,fileId]).
-2) B transforms PRE bundle locally → B_B(K); decapsulate → K; decrypt blocks.
+1) B lấy rk từ Central sau PoP (rk ngắn hạn, scope theo tag[,fileId]).
+2) B transform PRE bundle local → B_B(K); decapsulate → K; decrypt blocks.
 
 ### 6) Security & Privacy
-- Proof‑of‑possession (PoP) for B before re‑encrypt or issuing rk (nonce challenge, signed with sk_B).
-- Tag/Epoch binding: rust-umbral does not bind tag at the crypto layer; enforce via Central token/rk-scope (must contain {A,B,policyTag[,fileId]}, short TTL, Central signature). Store only transforms when the token is valid.
-- Authorization: Central checks follow + entitlement for the epoch (followYear(B→A) ≤ epoch).
-- Audit: Central/Store log (A,B,fileId,tag,timestamp,mode) on every transform.
-- Prefer the proxy flow to avoid releasing rk to the client; if client flow is used, rk must be short-lived and tightly scoped (tag[,fileId]).
+- Proof‑of‑possession (PoP) cho B trước khi re‑encrypt hoặc cấp rk (nonce challenge, ký bằng sk_B).
+- Tag/Epoch binding: rust-umbral không bind tag ở crypto; cưỡng chế bằng Central token/rk-scope (bắt buộc chứa {A,B,policyTag[,fileId]}, TTL ngắn, chữ ký Central). Store chỉ transform khi token hợp lệ.
+- Authorization: Central kiểm tra follow + entitlement cho epoch (followYear(B→A) ≤ epoch).
+- Audit: Central/Store log (A,B,fileId,tag,timestamp,mode) mỗi lần transform.
+- Ưu tiên proxy flow để tránh phát rk xuống client; nếu client flow dùng, rk phải ngắn hạn và scope chặt (tag[,fileId]).
 
 ### 7) Backward Compatibility
 - Option 1 unchanged. Clients can read both types in feeds.
@@ -181,126 +181,130 @@ Client (fallback):
 - Scope of rk: tag‑only vs tag+fileId; recommended: tag‑only with yearly epoch for UX, or tag+fileId for stricter control.
 - Storage of rk: persist in Central vs ephemeral transform token.
 
-### 10) Node‑local PRE integration (no shared PRE service)
+### 10) Node‑local PRE integration (không dùng PRE service chung)
 
-- Requirement: App, Central API, and Store are independent, distributed nodes. Each node integrates its own local PRE. Do not deploy a shared PRE proxy/service.
+- Yêu cầu: App, Central API, Store là các node độc lập, phân tán. Mỗi node tích hợp PRE cục bộ của chính mình. Không triển khai một PRE proxy/service chung.
 
-- Library choice
-  - Prefer Rust (Umbral/CPRE implementation) built as:
+- Lựa chọn thư viện
+  - Ưu tiên Rust (Umbral/CPRE implementation) build thành:
     - Mobile/Desktop: `.so` (Android, Linux), `.dylib` (macOS/iOS), `.dll` (Windows)
     - Web: WASM + glue JS
-  - Expose a minimal C/ABI so hosts (Dart/Flutter, .NET) can call via FFI/PInvoke/WASM.
+  - Cấp API C/ABI tối giản để các host (Dart/Flutter, .NET) gọi qua FFI/PInvoke/WASM.
 
-- Required PRE lib functions (identical on every node)
+- Chức năng bắt buộc của PRE lib (đồng nhất cho mọi node)
   - `encapsulate_with_tag(pk_author, tag, K) -> PRE bundle [capsule,ciphertext(K),pkA]`
   - `generate_rekey(sk_author, pk_recipient, tag[, scope]) -> rk_A_to_B_tag`
   - `reencrypt(bundle, rk_A_to_B_tag) -> bundle_for_B (append verifying_pk + cfrag)`
   - `decapsulate(sk_recipient, bundle_for_B) -> K`
-  - All buffers must be zeroized after use; API returns standard error codes.
+  - Tất cả buffer cần zeroize sau khi dùng; API trả mã lỗi chuẩn.
 
-- Per-node integration
+- Tích hợp theo từng node
   - App (Flutter)
-    - Native (iOS/Android/macOS/Windows/Linux): use `dart:ffi` to call the Rust lib.
-    - Web: load WASM; wrap with `package:js`/`dart:js_interop`.
-    - Used in `PreService`:
-      - `createTaggedCapsule(K, pkA, tag)` calls `encapsulate_with_tag`.
-      - `generateRekey(skA, pkB, tag)` calls `generate_rekey` (when there is a new follower / start of year).
-      - Client fallback: `transformCapsule(capsule, rk)` calls `reencrypt` if client mode is selected.
-    - Security:
-      - sk_A/sk_B derived from mnemonic; keep in memory as briefly as possible, never log; zeroize after use.
-      - rk is generated only when needed, uploaded to Central; do not persist rk long-term.
-    - Periodic tasks:
-      - Sync new followers → generate rk_{A→B}^{tag} and upload to Central.
-      - Year-start rollover → generate rk for the new tag.
+    - Native (iOS/Android/macOS/Windows/Linux): dùng `dart:ffi` gọi lib Rust.
+    - Web: nạp WASM; wrap bằng `package:js`/`dart:js_interop`.
+    - Dùng trong `PreService`:
+      - `createTaggedCapsule(K, pkA, tag)` gọi `encapsulate_with_tag`.
+      - `generateRekey(skA, pkB, tag)` gọi `generate_rekey` (khi có follower mới/đầu năm).
+      - Fallback client: `transformCapsule(capsule, rk)` gọi `reencrypt` nếu chọn chế độ client.
+    - Bảo mật:
+      - sk_A/sk_B sinh từ mnemonic; giữ in‑memory tối thiểu, không log; zeroize sau dùng.
+      - rk chỉ sinh khi cần, upload Central; không lưu rk lâu dài.
+    - Nhiệm vụ định kỳ:
+      - Đồng bộ followers mới → sinh rk_{A→B}^{tag} và upload Central.
+      - Rollover đầu năm → sinh rk cho tag mới.
 
   - Store node (C#)
-    - Integrate the Rust lib via P/Invoke (`DllImport`) or a .NET wrapper (if available).
+    - Tích hợp lib Rust qua P/Invoke (`DllImport`) hoặc wrapper .NET (nếu có).
     - Endpoint `/api/pre/reencrypt`:
-      - Authenticate the request (headers); verify Central token for (A,B,tag[,fileId]).
-      - Call `reencrypt(bundle, rk|token)` from the lib/policy layer → return `EncryptedKeyForB` (transformed PRE bundle).
-      - Do not hold sk_A/sk_B; rk is used only temporarily; zeroize buffers; rate‑limit; audit.
-    - No shared PRE service: each Store runs its own PRE lib, independently updated/deployed.
+      - Xác thực yêu cầu (headers); verify token Central cho (A,B,tag[,fileId]).
+      - Gọi `reencrypt(bundle, rk|token)` từ lib/tầng policy → trả `EncryptedKeyForB` (PRE bundle đã transform).
+      - Không giữ sk_A/sk_B; rk chỉ dùng tạm thời; zeroize buffer; rate‑limit; audit.
+    - Không có PRE service chung: mỗi Store chạy lib PRE riêng, độc lập update/triển khai.
 
   - Central API (C#)
-    - Does not perform re‑encrypt; only verifies PoP, checks entitlement/epoch, stores rk (or issues a short-lived token so Store can obtain rk).
-    - Integrating the PRE lib is not required (Central does not transform); it only manages rk/token.
-    - Policy:
-      - PoP (B signs nonce) before issuing rk/token.
-      - Entitlement: only issue rk for `followers:<YYYY>` where `YYYY >= followYear(B→A)`.
-      - Prefer tokens for Store (proxy mode); only return rk to the client on fallback.
+    - Không thực hiện re‑encrypt; chỉ xác thực PoP, kiểm tra quyền/epoch, lưu rk (hoặc cấp token ngắn hạn để Store lấy rk).
+    - Tích hợp lib PRE là không bắt buộc (Central không transform); chỉ quản lý rk/token.
+    - Chính sách:
+      - PoP (B ký nonce) trước khi cấp rk/token.
+      - Entitlement: chỉ cấp rk cho `followers:<YYYY>` với `YYYY >= followYear(B→A)`.
+      - Ưu tiên token cho Store (proxy mode), chỉ trả rk cho client khi fallback.
 
-- End-to-end flow (no shared PRE service)
-  1) App A publishes a followers post (Option 2): create K; `encapsulate_with_tag(pkA, tag, K)` → `encryptedKey = capsule`.
-  2) A tracks followers and epoch:
-     - `generate_rekey(skA, pkB, tag)` for each entitled B → `upload-rekey` to Central.
-  3) App B reads the post:
-     - PoP with Central → receive token (proxy mode) or rk (client mode fallback).
-     - Proxy mode: B calls Store `/api/pre/reencrypt` (Store checks token, loads rk if needed) → Store calls local lib `reencrypt(capsule, rk)` → returns `C_B(K)`.
-     - Client mode: B receives rk, calls local lib `reencrypt(capsule, rk)` → `C_B(K)`.
-     - B calls `decapsulate(skB, C_B(K))` → obtains K, decrypts content.
+- Kịch bản hoạt động end‑to‑end (không PRE service chung)
+  1) App A đăng bài followers (Option 2): tạo K; `encapsulate_with_tag(pkA, tag, K)` → `encryptedKey = capsule`.
+  2) A theo dõi followers và epoch:
+     - `generate_rekey(skA, pkB, tag)` cho từng B đủ quyền → `upload-rekey` lên Central.
+  3) App B đọc bài:
+     - PoP với Central → nhận token (proxy mode) hoặc rk (client mode fallback).
+     - Proxy mode: B gọi Store `/api/pre/reencrypt` (Store kiểm tra token, tải rk nếu cần) → Store gọi lib cục bộ `reencrypt(capsule, rk)` → trả `C_B(K)`.
+     - Client mode: B nhận rk, gọi lib cục bộ `reencrypt(capsule, rk)` → `C_B(K)`.
+     - B gọi `decapsulate(skB, C_B(K))` → lấy K, giải nội dung.
 
-- Build & release (cross-platform)
+- Build & phát hành (đa nền tảng)
   - Rust lib: build matrix (Android/arm64‑v8a, iOS/arm64, macOS/x86_64+arm64, Windows/x64, Linux/x64) + WASM.
-  - App: package artifacts per platform; dynamic loading via `dart:ffi`/WASM loader.
-  - Store/Central: include native lib in publish; configure path to load DLL/DYLIB/SO.
-  - Versioning: same PRE lib version across nodes to avoid capsule/rk format mismatches.
+  - App: gói artifacts theo nền tảng; dynamic loading qua `dart:ffi`/WASM loader.
+  - Store/Central: include native lib trong publish; cấu hình path nạp DLL/DYLIB/SO.
+  - Phiên bản hóa: cùng version PRE lib giữa các node để tránh sai khác định dạng capsule/rk.
 
--- Data format
-  - `encryptedKey` (PRE bundle) = base64 of a length-prefixed PRE blob:
+-- Định dạng dữ liệu
+  - `encryptedKey` (PRE bundle) = base64 của blob PRE dạng length-prefixed:
     - [u32 cap_len][cap]
     - [u32 ct_len][ciphertext_of_K]
     - [u32 pkA_len][pkA]
-    - After re-encrypt append:
+    - Sau khi re-encrypt append:
       - [u32 vpk_len][verifying_pk]
       - [u32 cfrag_len][cfrag]
-  - `rk` = base64; scoped by `tag` (and optionally `fileId`) managed by Central.
-  - Proxy `token` (JSON, signed by Central): { followingPubKey, followerPublicKey, tag[, fileId], exp, signature } allowing Store to transform.
+  - `rk` = base64; scope theo `tag` (và tùy chọn `fileId`) do Central quản lý.
+  - `token` proxy (JSON, ký bởi Central): { followingPubKey, followerPublicKey, tag[, fileId], exp, signature } cho phép Store transform.
 
-- Testing & safety
-  - TEST vectors: round‑trip encapsulate → reencrypt → decapsulate.
-  - Negative: wrong tag, wrong epoch, wrong PoP, wrong rk → reject.
-  - Bench: transform latency; memory zeroization; fuzz inputs (capsule/rk) against the Rust lib.
+- Kiểm thử & an toàn
+  - Vectors TEST: round‑trip encapsulate → reencrypt → decapsulate.
+  - Negative: tag sai, epoch sai, PoP sai, rk sai → từ chối.
+  - Bench: latency transform; memory zeroization; fuzz inputs (capsule/rk) với lib Rust.
 
 
 ### 11) Implementation status & notes (CURRENT)
 
 - App (Flutter)
-  - UI: Followers Option 1/Option 2 toggle has been added in create post.
-  - Create post (Option 2):
-    - Generate K with a secure RNG; `PostService.createPost` calls FFI `encapsulate_with_tag` via `PreFfi` to create the PRE bundle and injects it into `FileCryptoService.encryptAndSplitFile` via `injectedSymmetricKey` and `preEncryptedKeyBundle`.
-    - Metadata records `encryptedKey` = PRE bundle (base64), `capsuleFor="tag"`, `policyTag`, `policyScheme="CPRE"`.
-  - Read post (Followers feed):
-    - If `capsuleFor!='tag'` → decrypt via Option 1.
-    - If `capsuleFor=='tag'` → call Store `/api/file/pre/reencrypt` (proxy mode) to receive the transformed bundle; `PreService.decapsulateAndRecoverKey` calls FFI `decapsulate_for_recipient` to obtain K and decrypt content.
-    - Client mode fallback exists: `PreService.clientTransform` (PoP → Central `/policy/fetch-rekey?mode=client` → FFI `reencrypt`).
-  - Rekey (author):
-    - `PreService.publishTag`, `uploadRekey`, `generateAndUploadRekeys` (generate rk via FFI `generate_rekey` and upload to Central) are implemented; currently called automatically after publishing a Followers+PRE post. Can also be called on startup/sync by epoch.
+  - UI: Toggle Followers Option 1/Option 2 đã thêm trong create post.
+  - Tạo bài (Option 2):
+    - Sinh K bằng RNG an toàn; `PostService.createPost` gọi FFI `encapsulate_with_tag` qua `PreFfi` để tạo PRE bundle và inject vào `FileCryptoService.encryptAndSplitFile` qua `injectedSymmetricKey` và `preEncryptedKeyBundle`.
+    - Metadata ghi `encryptedKey` = PRE bundle (base64), `capsuleFor="tag"`, `policyTag`, `policyScheme="CPRE"`.
+  - Đọc bài (Followers feed):
+    - Nếu `capsuleFor!='tag'` → giải theo Option 1.
+    - Nếu `capsuleFor=='tag'` → gọi Store `/api/file/pre/reencrypt` (proxy mode) để nhận bundle đã transform; `PreService.decapsulateAndRecoverKey` gọi FFI `decapsulate_for_recipient` để lấy K, giải nội dung.
+    - Fallback client mode đã có: `PreService.clientTransform` (PoP → Central `/policy/fetch-rekey?mode=client` → FFI `reencrypt`).
+  - Rekey (tác giả):
+    - `PreService.publishTag`, `uploadRekey`, `generateAndUploadRekeys` (sinh rk qua FFI `generate_rekey` và upload Central) đã triển khai; hiện tự động gọi sau khi đăng bài Followers+PRE. Có thể gọi khi khởi động/đồng bộ theo epoch.
   - FFI/Loader:
     - `lib/services/pre_ffi.dart` wraps C‑ABI: `umbral_encapsulate_with_tag`, `umbral_generate_rekey`, `umbral_reencrypt`, `umbral_decapsulate_for_recipient`, `umbral_free`.
-    - macOS: loader tries `libumbral_pre.dylib` and falls back to `@executable_path/../Frameworks/libumbral_pre.dylib`.
+    - macOS: loader thử `libumbral_pre.dylib` và fallback `@executable_path/../Frameworks/libumbral_pre.dylib`.
 
 - Store
-  - `/api/file/pre/reencrypt` validates the Central token and calls core Umbral PRE to transform; returns `encryptedKeyForB`.
-  - `followers-feed` returns both Option 1/2 + PRE fields.
+  - `/api/file/pre/reencrypt` xác thực token Central và gọi core Umbral PRE để transform; trả `encryptedKeyForB`.
+  - `followers-feed` trả đủ Option 1/2 + PRE fields.
 
 - Central API
-  - `PolicyController`: `nonce`, `publish-tag`, `upload-rekey`, `fetch-rekey`, `validate-token` are complete; token scoped by tag (and optionally fileId), short TTL.
+  - `PolicyController`: `nonce`, `publish-tag`, `upload-rekey`, `fetch-rekey`, `validate-token` hoàn chỉnh; token scope theo tag (và tùy chọn fileId), TTL ngắn.
 
-- Bundle format
-  - As described in the "Data format" section (length‑prefixed). App has a helper to extract `pkA` from the bundle for client‑transform.
+- Định dạng bundle
+  - Theo phần "Định dạng dữ liệu" (length‑prefixed). App có helper để trích xuất `pkA` từ bundle cho client‑transform.
 
 
 ### 12) Build & packaging (Flutter CURRENT)
 
 - Script: `deltanium-core/scripts/build_umbral_pre_flutter.sh`
-  - Android: `--android --app-dir <path-to-app>` → copy `.so` into `android/app/src/main/jniLibs/{arm64-v8a,armeabi-v7a,x86_64}`.
-  - macOS: `--macos --app-dir <path-to-app>` → copy `.dylib` into `macos/Frameworks`. Recommended to add a Copy Files phase to bundle it in the app.
-  - iOS: `--ios` (cargo-lipo if available) → produce a universal static lib; must add it to Runner and link manually.
+  - Android: `--android --app-dir <path-to-app>` → copy `.so` vào `android/app/src/main/jniLibs/{arm64-v8a,armeabi-v7a,x86_64}`.
+  - macOS: `--macos --app-dir <path-to-app>` → copy `.dylib` vào `macos/Frameworks`. Khuyến nghị thêm Copy Files phase để bundle trong app.
+  - iOS: `--ios` (cargo-lipo nếu có) → tạo static lib universal; cần add vào Runner và link thủ công.
 
-- macOS loader: fallback to `@executable_path/../Frameworks/libumbral_pre.dylib` is implemented for easier development.
+- Loader macOS: fallback về `@executable_path/../Frameworks/libumbral_pre.dylib` đã implement để tiện dev.
 
-- Remaining work (does not block macOS development):
-  - Add a Copy Files phase for macOS to bundle `.dylib` in release.
-  - Finish iOS integration (add static lib/xcframework to Runner) and Android (ensure jniLibs includes all required ABIs).
-  - (Optional) UI toggle for proxy/client transform.
-  - (Optional) Automatically trigger generate/upload rk on app startup or when a new follower appears / epoch changes.
+- Việc còn lại (không chặn dev trên macOS):
+  - Thêm Copy Files phase cho macOS để bundle `.dylib` trong release.
+  - Hoàn tất tích hợp iOS (add static lib/xcframework vào Runner) và Android (đảm bảo jniLibs có đủ ABI cần thiết).
+  - (Tùy chọn) UI toggle cho proxy/client transform.
+  - (Tùy chọn) Trigger tự động generate/upload rk lúc khởi động app hoặc khi có follower mới / đổi epoch.
+
+
+
+

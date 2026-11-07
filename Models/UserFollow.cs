@@ -9,6 +9,6 @@ namespace DeltaniumApi.Models
         public string FollowingPublicKey { get; set; } // User being followed
         public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
         public long Timestamp { get; set; } // Unix timestamp for blockchain (signed by user)
-        public string Signature { get; set; } // Signature of the follow action for blockchain verification
+        public string? Signature { get; set; } // Signature of the follow action for blockchain verification
     }
 } 

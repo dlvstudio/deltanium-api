@@ -19,7 +19,7 @@ namespace DeltaniumApi.Controllers
     public class UserController : ControllerBase
     {
         private readonly KeyService _keyService;
-        private readonly StorageService _storageService;
+        private readonly IStorageService _storageService;
 
         public class RegistrationResponse
         {
@@ -48,7 +48,7 @@ namespace DeltaniumApi.Controllers
             public long Timestamp { get; set; }
         }
 
-        public UserController(KeyService keyService, StorageService storageService)
+        public UserController(KeyService keyService, IStorageService storageService)
         {
             _keyService = keyService;
             _storageService = storageService;

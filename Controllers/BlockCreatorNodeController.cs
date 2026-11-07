@@ -13,7 +13,7 @@ namespace DeltaniumApi.Controllers
     public class BlockCreatorNodeController : ControllerBase
     {
         private readonly KeyService _keyService;
-        private readonly StorageService _storageService;
+        private readonly IStorageService _storageService;
 
         public class NodeRegistrationRequest
         {
@@ -52,7 +52,7 @@ namespace DeltaniumApi.Controllers
             public string CentralPublicKey { get; set; } = string.Empty;
         }
 
-        public BlockCreatorNodeController(KeyService keyService, StorageService storageService)
+        public BlockCreatorNodeController(KeyService keyService, IStorageService storageService)
         {
             _keyService = keyService;
             _storageService = storageService;
@@ -80,17 +80,16 @@ namespace DeltaniumApi.Controllers
                 return BadRequest("Invalid public key format");
             }
 
-            // Check voucher validity
-            if (!await _storageService.IsVoucherValidAsync(request.Voucher))
-            {
-                return BadRequest("Invalid or already used voucher");
-            }
-
             // Check if node already registered by public key
             var existingNodes = await _storageService.GetBlockCreatorNodesAsync();
             if (existingNodes.Any(n => n.PublicKey == request.PublicKey))
             {
                 return Conflict("Block Creator node already registered");
+            }
+
+            if (!await _storageService.TryMarkVoucherUsedAsync(request.Voucher))
+            {
+                return BadRequest("Invalid or already used voucher");
             }
 
             var node = new BlockCreatorNode
@@ -100,7 +99,6 @@ namespace DeltaniumApi.Controllers
             };
 
             await _storageService.SaveBlockCreatorNodeAsync(node);
-            await _storageService.MarkVoucherUsedAsync(request.Voucher);
 
             return new NodeRegistrationResponse
             {

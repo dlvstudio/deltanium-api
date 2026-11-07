@@ -1,10 +1,6 @@
 [
   {
-    "Code": "00000000-0000-0000-0000-000000000001",
-    "Used": false
-  },
-  {
-    "Code": "00000000-0000-0000-0000-000000000002",
+    "Code": "REPLACE-WITH-ONE-TIME-VOUCHER",
     "Used": false
   }
 ]

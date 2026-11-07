@@ -9,14 +9,21 @@ namespace DeltaniumApi.Services
 {
     public class KeyService
     {
-        private const string CentralKeyFile = "central_keys.json";
+        /// <summary>
+        /// Local untracked file (gitignored). Prefer env CENTRAL_PRIVATE_KEY / CENTRAL_PUBLIC_KEY.
+        /// </summary>
+        private static readonly string CentralKeyFile =
+            Environment.GetEnvironmentVariable("CENTRAL_KEYS_PATH")
+            ?? Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                ".deltanium",
+                "central_keys.json");
 
         public (string mnemonic, string publicKey) GenerateKeyPair()
         {
             var mnemonic = new Mnemonic(Wordlist.English, WordCount.Twelve);
             var masterKey = mnemonic.DeriveExtKey();
             var publicKey = masterKey.PrivateKey.PubKey.ToString();
-            
             return (mnemonic.ToString(), publicKey);
         }
 
@@ -24,7 +31,7 @@ namespace DeltaniumApi.Services
         {
             try
             {
-                var key = new PubKey(publicKey);
+                _ = new PubKey(publicKey);
                 return true;
             }
             catch
@@ -37,49 +44,21 @@ namespace DeltaniumApi.Services
         {
             try
             {
-                Console.WriteLine($"[KeyService.VerifySignature] publicKey: {publicKey} (len={publicKey.Length})");
-                Console.WriteLine($"[KeyService.VerifySignature] message: '{message}' (len={message.Length})");
-                Console.WriteLine($"[KeyService.VerifySignature] signature (base64): {signature} (len={signature.Length})");
-                
                 var pubKey = new PubKey(publicKey);
-                Console.WriteLine($"[KeyService.VerifySignature] PubKey parsed OK, compressed: {pubKey.IsCompressed}");
-                
-                // Create SHA256 hash of the message
                 using var sha256 = SHA256.Create();
-                var messageBytes = Encoding.UTF8.GetBytes(message);
-                var hashBytes = sha256.ComputeHash(messageBytes);
-                Console.WriteLine($"[KeyService.VerifySignature] messageHash (hex): {Convert.ToHexString(hashBytes).ToLower()}");
-                
-                // Convert signature from base64 to bytes
+                var hashBytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(message));
                 var signatureBytes = Convert.FromBase64String(signature);
-                Console.WriteLine($"[KeyService.VerifySignature] signatureBytes len: {signatureBytes.Length}");
-                Console.WriteLine($"[KeyService.VerifySignature] signatureBytes (hex): {Convert.ToHexString(signatureBytes).ToLower()}");
-                
-                // Build both endian variants to ensure compatibility
-                var hashLE = new uint256(hashBytes); // treat input as little-endian
-                var hashBE = new uint256(hashBytes, lendian: false); // treat input as big-endian
-
-                // Verify with DER directly (core will parse)
+                var hashLE = new uint256(hashBytes);
+                var hashBE = new uint256(hashBytes, lendian: false);
                 var resultLE = pubKey.Verify(hashLE, signatureBytes);
                 var resultBE = pubKey.Verify(hashBE, signatureBytes);
-                Console.WriteLine($"[KeyService.VerifySignature] Verify(hashLE, DER): {resultLE}");
-                Console.WriteLine($"[KeyService.VerifySignature] Verify(hashBE, DER): {resultBE}");
-
-                // Also verify using parsed signature explicitly, in case parsing differences occur
                 var ecdsaSig = NBitcoin.Crypto.ECDSASignature.FromDER(signatureBytes).MakeCanonical();
                 var resultLE2 = pubKey.Verify(hashLE, ecdsaSig);
                 var resultBE2 = pubKey.Verify(hashBE, ecdsaSig);
-                Console.WriteLine($"[KeyService.VerifySignature] Verify(hashLE, ECDSA): {resultLE2}");
-                Console.WriteLine($"[KeyService.VerifySignature] Verify(hashBE, ECDSA): {resultBE2}");
-
-                var finalResult = resultLE || resultBE || resultLE2 || resultBE2;
-                Console.WriteLine($"[KeyService.VerifySignature] Verification result: {finalResult}");
-                return finalResult;
+                return resultLE || resultBE || resultLE2 || resultBE2;
             }
-            catch (Exception ex)
+            catch
             {
-                Console.WriteLine($"[KeyService.VerifySignature] Exception: {ex.Message}");
-                Console.WriteLine($"[KeyService.VerifySignature] StackTrace: {ex.StackTrace}");
                 return false;
             }
         }
@@ -97,12 +76,16 @@ namespace DeltaniumApi.Services
             using var sha256 = SHA256.Create();
             var hashBytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(message));
             var sig = key.Sign(new uint256(hashBytes));
-            var der = sig.ToDER();
-            return Convert.ToBase64String(der);
+            return Convert.ToBase64String(sig.ToDER());
         }
 
         private (string publicKey, string privateKey) GetOrCreateCentralKeyPair()
         {
+            var envPub = Environment.GetEnvironmentVariable("CENTRAL_PUBLIC_KEY");
+            var envPriv = Environment.GetEnvironmentVariable("CENTRAL_PRIVATE_KEY");
+            if (!string.IsNullOrWhiteSpace(envPub) && !string.IsNullOrWhiteSpace(envPriv))
+                return (envPub.Trim(), envPriv.Trim());
+
             try
             {
                 if (File.Exists(CentralKeyFile))
@@ -110,9 +93,7 @@ namespace DeltaniumApi.Services
                     var json = File.ReadAllText(CentralKeyFile);
                     var info = JsonSerializer.Deserialize<CentralKeyInfo>(json);
                     if (info != null && !string.IsNullOrWhiteSpace(info.PrivateKey))
-                    {
                         return (info.PublicKey, info.PrivateKey);
-                    }
                 }
             }
             catch (Exception ex)
@@ -120,13 +101,18 @@ namespace DeltaniumApi.Services
                 Console.WriteLine($"[KeyService] Error reading {CentralKeyFile}: {ex.Message}");
             }
 
+            // Dev-only fallback: write outside repo (gitignored path under home)
             var newKey = new Key();
             var newInfo = new CentralKeyInfo
             {
                 PublicKey = newKey.PubKey.ToHex(),
                 PrivateKey = newKey.ToHex()
             };
+            var dir = Path.GetDirectoryName(CentralKeyFile);
+            if (!string.IsNullOrEmpty(dir))
+                Directory.CreateDirectory(dir);
             File.WriteAllText(CentralKeyFile, JsonSerializer.Serialize(newInfo, new JsonSerializerOptions { WriteIndented = true }));
+            Console.WriteLine($"[KeyService] Generated new central keys at {CentralKeyFile} (not for production)");
             return (newInfo.PublicKey, newInfo.PrivateKey);
         }
 
@@ -136,4 +122,4 @@ namespace DeltaniumApi.Services
             public string PrivateKey { get; set; } = string.Empty;
         }
     }
-} 
+}

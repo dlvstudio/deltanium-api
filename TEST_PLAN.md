@@ -1,39 +1,57 @@
-# Unit Test Plan for Deltanium API
+# Kế Hoạch Unit Test cho Deltanium API
 
-## 1. Overview
+## 1. Tổng Quan
 
-### Goals
-- Ensure code quality and stability
-- Catch bugs early during development
-- Document component behavior
-- Support safe refactoring
+### Mục Tiêu
+- Đảm bảo chất lượng code và tính ổn định
+- Phát hiện bugs sớm trong quá trình development
+- Tài liệu hóa behavior của các components
+- Hỗ trợ refactoring an toàn
 
 ### Coverage Goals
 - **Controllers**: 80%+ coverage
 - **Services**: 90%+ coverage
 - **Critical paths**: 100% coverage (user registration, node registration)
 
-## 2. Test Project Structure
+## 2. Cấu Trúc Test Project
 
 ```
 deltanium-api.Tests/
-├── Controllers/
-│   ├── UserControllerTests.cs
-│   ├── StoreNodeControllerTests.cs
-│   ├── BlockCreatorNodeControllerTests.cs
-│   ├── StoredFileControllerTests.cs
-│   └── PolicyControllerTests.cs
+├── Controllers/          # (planned / partial)
 ├── Services/
 │   ├── KeyServiceTests.cs
-│   └── StorageServiceTests.cs
+│   ├── StorageServiceTests.cs
+│   ├── MySqlStorageServiceTests.cs      # InMemory EF
+│   └── SignatureAuthHelperTests.cs      # signed request auth
+├── Integration/
+│   └── RealMysqlStorageIntegrationTests.cs  # remote MySQL (User Secrets)
 ├── Helpers/
 │   ├── TestDataBuilder.cs
-│   ├── MockHelpers.cs
+│   ├── InMemoryDb.cs
+│   ├── RealMysql.cs
 │   └── TestFileHelper.cs
 └── deltanium-api.Tests.csproj
 ```
 
-## 3. Detailed Test Cases
+### Real MySQL integration (đã có)
+
+Chạy khi có `deltanium-api-local-secrets` hoặc `DELTANIUM_MYSQL_CS`:
+
+```bash
+dotnet test --filter "FullyQualifiedName~RealMysql"
+```
+
+Cases quan trọng:
+
+| Test | Mục đích |
+|------|----------|
+| `RealDb_RegisterFollowRekey_AndPullTransactions` | user / follow / rekey / voucher / file / tx pull |
+| `RealDb_TryMarkVoucherUsed_IsAtomic` | voucher one-shot trên SQL thật |
+| `RealDb_SaveStoredFilesBatch_RegistersNofMReplicas` | N-of-M index cùng `fileId` |
+| `RealDb_SignatureAuth_AgainstRegisteredUser` | ký request thật + user đã đăng ký |
+| `RealDb_HttpRegister_WithValidSignature_RoundTrip` | crypto đăng ký |
+
+## 3. Test Cases Chi Tiết
 
 ### 3.1. KeyService Tests
 
@@ -217,6 +235,16 @@ deltanium-api.Tests/
 2. **ListNodes**
    - ✅ Returns all active block creator nodes
    - ✅ Returns empty list when no nodes
+
+### 3.5b. SignatureAuthHelper & N-of-M (đã thêm)
+
+1. **SignatureAuthHelper**
+   - ✅ Valid signed POST
+   - ✅ Missing headers / expired timestamp / unregistered user
+   - ✅ `requireRegisteredUser: false` cho tx submit path
+2. **MySqlStorageService**
+   - ✅ `TryMarkVoucherUsedAsync` first=true, second=false
+   - ✅ `SaveStoredFilesBatchAsync` two replicas same `fileId`
 
 ### 3.6. StoredFileController Tests
 
@@ -443,3 +471,12 @@ var validNode = new StoreNode
 - [Moq Documentation](https://github.com/moq/moq4)
 - [FluentAssertions Documentation](https://fluentassertions.com/)
 - [ASP.NET Core Testing](https://docs.microsoft.com/en-us/aspnet/core/test/)
+
+
+
+
+
+
+
+
+

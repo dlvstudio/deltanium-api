@@ -1,12 +1,14 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Configuration;
 using DeltaniumApi.Services;
 using DeltaniumApi.Models;
 
@@ -16,14 +18,21 @@ namespace DeltaniumApi.Controllers
 	[Route("api/policy")]
 	public class PolicyController : ControllerBase
 	{
-		private static readonly string NoncePath = Path.Combine(AppContext.BaseDirectory, "pre_nonce.json");
-		private readonly StorageService _storageService;
+		private static readonly string NoncePath = Path.Combine(
+			Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+			".deltanium",
+			"pre_nonce.json");
+		private readonly IStorageService _storageService;
+		private readonly SignatureAuthHelper _auth;
+		private readonly IConfiguration _config;
 
 		private record NonceRecord(string UserPubKey, string Nonce, DateTime Exp);
 
-		public PolicyController(StorageService storageService)
+		public PolicyController(IStorageService storageService, SignatureAuthHelper auth, IConfiguration config)
 		{
 			_storageService = storageService;
+			_auth = auth;
+			_config = config;
 		}
 
 		[HttpGet("nonce")]
@@ -32,6 +41,8 @@ namespace DeltaniumApi.Controllers
 			if (string.IsNullOrWhiteSpace(userPubKey)) return BadRequest("userPubKey required");
 			var nonce = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
 			var rec = new NonceRecord(userPubKey, nonce, DateTime.UtcNow.AddMinutes(5));
+			var dir = Path.GetDirectoryName(NoncePath);
+			if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
 			System.IO.File.WriteAllText(NoncePath, JsonSerializer.Serialize(rec));
 			return Ok(new { nonce, exp = rec.Exp });
 		}
@@ -51,29 +62,35 @@ namespace DeltaniumApi.Controllers
 		/// Called by author's app after generating rk(A→B) locally
 		/// </summary>
 		[HttpPost("upload-rekey")]
-		public async Task<IActionResult> UploadRekey([FromBody] JsonElement body)
+		public async Task<IActionResult> UploadRekey()
 		{
+			Request.EnableBuffering();
+			using var reader = new StreamReader(Request.Body);
+			var rawBody = await reader.ReadToEndAsync();
+			Request.Body.Position = 0;
+
+			var (ok, following, err) = await _auth.ValidateAsync(Request, rawBody);
+			if (!ok) return Unauthorized(err);
+
+			using var doc = JsonDocument.Parse(string.IsNullOrWhiteSpace(rawBody) ? "{}" : rawBody);
+			var body = doc.RootElement;
 			var follower = body.TryGetProperty("followerPubKey", out var fp) ? fp.GetString() : null;
-			var following = Request.Headers["X-User-PubKey"].ToString(); // Author A from header
 			var tag = body.TryGetProperty("tag", out var tg) ? tg.GetString() : null;
 			var rk = body.TryGetProperty("rk", out var rkJ) ? rkJ.GetString() : null;
 			var scope = body.TryGetProperty("scope", out var sc) ? sc.GetString() : "tag";
 			var fileId = body.TryGetProperty("fileId", out var fid) ? fid.GetString() : null;
-			
-			if (string.IsNullOrWhiteSpace(follower) || string.IsNullOrWhiteSpace(following) || 
+
+			if (string.IsNullOrWhiteSpace(follower) || string.IsNullOrWhiteSpace(following) ||
 			    string.IsNullOrWhiteSpace(tag) || string.IsNullOrWhiteSpace(rk))
 				return BadRequest("Missing required fields: followerPubKey, tag, rk");
 
-			// Verify A actually follows relationship (A should only upload rekeys for their followers)
 			var isFollower = await _storageService.IsFollowingAsync(follower, following);
 			if (!isFollower)
-			{
 				return BadRequest("Follower relationship does not exist");
-			}
 
 			var rekey = new UserRekey
 			{
-				FollowingPubKey = following,
+				FollowingPubKey = following!,
 				FollowerPubKey = follower,
 				Tag = tag,
 				Scope = scope!,
@@ -84,9 +101,6 @@ namespace DeltaniumApi.Controllers
 			};
 
 			await _storageService.SaveRekeyAsync(rekey);
-			
-			Console.WriteLine($"[UPLOAD_REKEY] Saved rekey: {following} → {follower} (tag: {tag})");
-			
 			return Ok(new { ok = true, message = "Rekey uploaded successfully" });
 		}
 		
@@ -98,22 +112,19 @@ namespace DeltaniumApi.Controllers
 		{
 			try
 			{
-				var following = Request.Headers["X-User-PubKey"].ToString(); // Author A from header
-				
-				// Read raw body and parse manually to avoid model binding issues
 				Request.EnableBuffering();
 				Request.Body.Position = 0;
 				using var reader = new StreamReader(Request.Body);
 				var rawBody = await reader.ReadToEndAsync();
 				Request.Body.Position = 0;
-				
+
+				var (okAuth, following, authErr) = await _auth.ValidateAsync(Request, rawBody);
+				if (!okAuth) return Unauthorized(authErr);
+
 				Console.WriteLine($"[UPLOAD_REKEYS_BATCH] Request from: {following}");
-				Console.WriteLine($"[UPLOAD_REKEYS_BATCH] Raw body length: {rawBody.Length}");
-				Console.WriteLine($"[UPLOAD_REKEYS_BATCH] Raw body preview: {(rawBody.Length > 200 ? rawBody.Substring(0, 200) + "..." : rawBody)}");
-				
+
 				if (string.IsNullOrWhiteSpace(rawBody))
 				{
-					Console.WriteLine("[UPLOAD_REKEYS_BATCH] ERROR: Empty request body");
 					return BadRequest("Empty request body");
 				}
 
@@ -267,6 +278,14 @@ namespace DeltaniumApi.Controllers
 		[HttpPost("validate-token")]
 		public async Task<IActionResult> ValidateToken([FromBody] JsonElement body)
 		{
+			var expected = _config["InternalApi:Token"];
+			if (string.IsNullOrWhiteSpace(expected) ||
+			    !Request.Headers.TryGetValue("X-Internal-Token", out var provided) ||
+			    !string.Equals(provided.FirstOrDefault(), expected, StringComparison.Ordinal))
+			{
+				return Unauthorized("Store/internal token required");
+			}
+
 			var token = body.TryGetProperty("token", out var tk) ? tk.GetString() : null;
 			if (string.IsNullOrWhiteSpace(token)) return BadRequest("token required");
 			try

@@ -12,7 +12,7 @@ namespace DeltaniumApi.Controllers
     public class StoreNodeController : ControllerBase
     {
         private readonly KeyService _keyService;
-        private readonly StorageService _storageService;
+        private readonly IStorageService _storageService;
 
         public class NodeRegistrationRequest
         {
@@ -28,7 +28,7 @@ namespace DeltaniumApi.Controllers
             public string Endpoint { get; set; }
         }
 
-        public StoreNodeController(KeyService keyService, StorageService storageService)
+        public StoreNodeController(KeyService keyService, IStorageService storageService)
         {
             _keyService = keyService;
             _storageService = storageService;
@@ -49,17 +49,17 @@ namespace DeltaniumApi.Controllers
             {
                 return BadRequest("PublicKey is required");
             }
-            // Check voucher validity
-            if (!await _storageService.IsVoucherValidAsync(request.Voucher))
-            {
-                return BadRequest("Invalid or already used voucher");
-            }
-
             // Check if node already registered by public key
             var existingNodes = await _storageService.GetNodesAsync();
             if (existingNodes.Any(n => n.PublicKey == request.PublicKey))
             {
                 return Conflict("Store node already registered");
+            }
+
+            // Atomic voucher consume (prevents double registration races)
+            if (!await _storageService.TryMarkVoucherUsedAsync(request.Voucher))
+            {
+                return BadRequest("Invalid or already used voucher");
             }
 
             var node = new StoreNode
@@ -69,7 +69,6 @@ namespace DeltaniumApi.Controllers
             };
 
             await _storageService.SaveNodeAsync(node);
-            await _storageService.MarkVoucherUsedAsync(request.Voucher);
 
             return new NodeRegistrationResponse
             {

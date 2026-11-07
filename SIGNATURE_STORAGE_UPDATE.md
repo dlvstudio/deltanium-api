@@ -1,33 +1,32 @@
 # Signature Storage with Timestamp Update
 
-## Overview
+## Tổng quan
+Cập nhật này thêm khả năng lưu trữ chữ ký (signature) cùng với timestamp của user trong quá trình đăng ký để có thể sử dụng cho các thao tác blockchain sau này. Timestamp được bao gồm trong signature để đảm bảo tính bảo mật và chống replay attacks.
 
-This update stores the user's registration signature together with the timestamp so they can be reused for later blockchain operations. The timestamp is included in the signed payload to improve security and prevent replay attacks.
+## Các thay đổi đã thực hiện
 
-## Changes
+### 1. Model Updates
 
-### 1. Model updates
-
-#### User model (`Models/User.cs`)
-- Added `Signature` to store the registration signature
-- Added `RegistrationTimestamp` to store the timestamp used in that signature
+#### User Model (Models/User.cs)
+- Thêm field `Signature` để lưu trữ chữ ký đăng ký
+- Thêm field `RegistrationTimestamp` để lưu trữ timestamp được dùng trong signature
 ```csharp
 public string Signature { get; set; } // Registration signature for blockchain operations
 public long? RegistrationTimestamp { get; set; } // Unix timestamp used in registration signature
 ```
 
-#### SignedRegisterRequest model (`Models/Requests/SignedRegisterRequest.cs`)
-- Added `Timestamp` sent by the client
+#### SignedRegisterRequest Model (Models/Requests/SignedRegisterRequest.cs)
+- Thêm field `Timestamp` để gửi timestamp từ client
 ```csharp
 public long Timestamp { get; set; } // Unix timestamp for signature validation
 ```
 
-### 2. API controller updates (`Controllers/UserController.cs`)
+### 2. API Controller Updates (Controllers/UserController.cs)
 
-#### Register endpoint
-- Validate timestamp (not too old or too far in the future)
-- Verify signature over `email:fullName:yyyy-MM-dd:timestamp`
-- Persist both signature and timestamp
+#### Register Endpoint
+- Validate timestamp (không quá cũ hoặc quá xa trong tương lai)
+- Verify signature bao gồm timestamp: `email:fullName:yyyy-MM-dd:timestamp`
+- Lưu cả signature và timestamp vào database
 ```csharp
 // Validate timestamp
 var requestTime = DateTimeOffset.FromUnixTimeSeconds(request.Timestamp);
@@ -42,37 +41,37 @@ if (timeDiff > 5) // 5 minutes window
 var dataToVerify = $"{request.Email}:{request.FullName}:{request.DateOfBirth?.ToString("yyyy-MM-dd")}:{request.Timestamp}";
 ```
 
-#### UpdateProfile endpoint
-- Include timestamp in signature verification
-- Store a new timestamp when the profile is updated
+#### UpdateProfile Endpoint
+- Cập nhật để cũng bao gồm timestamp trong signature verification
+- Lưu timestamp mới khi update profile
 
-#### GetUsersWithSignatures endpoint
-- Include `RegistrationTimestamp` in the response
+#### GetUsersWithSignatures Endpoint
+- Bao gồm `RegistrationTimestamp` trong response
 - Endpoint: `GET /api/user/signatures`
 
-### 3. Frontend updates (deltanium-app)
+### 3. Frontend Updates (deltanium-app)
 
-#### SignedRegisterRequest model (`lib/models/signed_register_request.dart`)
-- Added `timestamp`
-- Updated `getSignableData()` to include timestamp
+#### SignedRegisterRequest Model (lib/models/signed_register_request.dart)
+- Thêm field `timestamp`
+- Cập nhật `getSignableData()` để bao gồm timestamp
 ```dart
 String getSignableData() {
   return '$email:$fullName:${dateOfBirth?.toString().split(' ')[0]}:$timestamp';
 }
 ```
 
-#### Registration logic
+#### Registration Logic
 - Generate timestamp: `DateTime.now().millisecondsSinceEpoch ~/ 1000`
-- Include timestamp in the signature
-- Send timestamp in the request body
+- Bao gồm timestamp trong signature
+- Gửi timestamp trong request body
 
-### 4. Database update (`users.json`)
-- Added `RegistrationTimestamp: null` for existing users
-- Newly registered users store both signature and timestamp
+### 4. Database Update (users.json)
+- Thêm field `RegistrationTimestamp: null` cho tất cả user hiện có
+- User mới đăng ký sẽ có cả signature và timestamp được lưu
 
-## Usage
+## Cách sử dụng
 
-### Register a new user (signature + timestamp)
+### Đăng ký user mới (có signature + timestamp)
 ```dart
 // Client generates timestamp
 final timestamp = (DateTime.now().millisecondsSinceEpoch ~/ 1000);
@@ -94,7 +93,7 @@ final request = {
 };
 ```
 
-### List users that have a signature
+### Lấy danh sách user có signature
 ```http
 GET /api/user/signatures
 ```
@@ -114,31 +113,31 @@ Response:
 ]
 ```
 
-### Blockchain use
-- The signature was verified with a timestamp at registration
-- Signature + timestamp can be used to publish user info onto the blockchain
-- Signature is over `email:fullName:yyyy-MM-dd:timestamp`
-- Timestamp provides uniqueness and replay protection
+### Sử dụng cho blockchain
+- Signature đã được verify với timestamp khi đăng ký
+- Có thể sử dụng signature + timestamp để đẩy thông tin user lên blockchain
+- Signature được tạo từ data: `email:fullName:yyyy-MM-dd:timestamp`
+- Timestamp đảm bảo tính duy nhất và chống replay attacks
 
-## Security
+## Bảo mật
 
-### Timestamp validation
-- The API rejects timestamps older than 5 minutes or too far in the future
-- Replay attacks are harder because the signature includes a unique timestamp
-- Requests must be created close to the time they are sent
+### Timestamp Validation
+- API validate timestamp không quá cũ (>5 phút) hoặc quá xa trong tương lai
+- Chống replay attacks vì signature bao gồm timestamp duy nhất
+- Đảm bảo request được tạo gần thời điểm gửi
 
-### Signature security
-- The signature covers the important fields: email, fullName, dateOfBirth, timestamp
-- Each registration has a unique signature because of the timestamp
-- Old signatures cannot be replayed because of timestamp validation
+### Signature Security
+- Signature bao gồm tất cả thông tin quan trọng: email, fullName, dateOfBirth, timestamp
+- Mỗi registration có signature duy nhất do timestamp
+- Không thể replay signature cũ do timestamp validation
 
-## Backward compatibility
-- Existing users may have `Signature: null` and `RegistrationTimestamp: null` and still work
-- New users automatically store both signature and timestamp
-- Existing features are unaffected
+## Backward Compatibility
+- User cũ có `Signature: null` và `RegistrationTimestamp: null` - vẫn hoạt động bình thường
+- User mới sẽ có cả signature và timestamp được lưu tự động
+- Không ảnh hưởng đến các chức năng hiện có
 
-## Future enhancements
-- Endpoint for a user to re-create a signature with a new timestamp
-- Batch endpoint to push many users to the blockchain at once
-- Blockchain service integration to auto-push user data with signature + timestamp
-- Signature expiration policy based on timestamp
+## Future Enhancements
+- Có thể thêm endpoint để user tạo lại signature với timestamp mới nếu cần
+- Thêm batch endpoint để đẩy nhiều user lên blockchain cùng lúc
+- Tích hợp với blockchain service để auto-push user data với signature + timestamp
+- Implement signature expiration policy dựa trên timestamp 

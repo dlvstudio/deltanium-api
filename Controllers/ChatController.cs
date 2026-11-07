@@ -17,9 +17,9 @@ namespace DeltaniumApi.Controllers
     public class ChatController : ControllerBase
     {
         private readonly KeyService _keyService;
-        private readonly StorageService _storageService;
+        private readonly IStorageService _storageService;
 
-        public ChatController(KeyService keyService, StorageService storageService)
+        public ChatController(KeyService keyService, IStorageService storageService)
         {
             _keyService = keyService;
             _storageService = storageService;

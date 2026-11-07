@@ -1,15 +1,17 @@
 # Deltanium API
 
-A centralized API service for the Deltanium ecosystem, managing user registrations and store node coordination.
+A centralized API service for the Deltanium ecosystem, managing user registrations, store/blocker coordination, PRE rekeys, and N-of-M file placement index.
 
 ## Features
 
 - User registration with cryptographic key pairs and signature verification
-- Store node registration and management
+- Store / Block Creator node registration (atomic one-shot vouchers)
 - Node discovery for file operations
 - Secure key generation using NBitcoin
 - PRE rekey management (delegated generation, Option 3)
-- File-based storage (upgradeable to database)
+- Signed request auth (`SignatureAuthHelper`) on sensitive write paths
+- N-of-M stored-file index (`register` + `register-replicas`)
+- Persistence: **MySQL** (default) with JSON fallback; secrets not committed
 
 ## User Registration Flow
 
@@ -72,15 +74,25 @@ A centralized API service for the Deltanium ecosystem, managing user registratio
 
 - Register, list, and manage storage nodes via `/api/storenode/*` endpoints.
   - `POST /api/storenode/register` (voucher-based): `{ endpoint, voucher, publicKey }`
-    - Validates voucher (unused), prevents duplicate registration by public key, stores node, marks voucher as used.
+    - **Atomic** voucher consume (`TryMarkVoucherUsedAsync`): only one concurrent register wins.
+    - Prevents duplicate registration by public key.
   - `GET /api/storenode/list`: lists active/registered storage nodes for clients to discover where to upload content.
 
-## Stored File Indexing
+## Stored File Indexing (N-of-M)
 
-- Endpoints under `/api/storedfile/*` allow the central API to index which files are stored on which nodes (optional but useful for discovery):
-  - `POST /api/storedfile/register`: register a file reference `{ ownerPublicKey, storeNodeId, ... }`
-  - `GET /api/storedfile/nodes/{publicKey}`: list nodes storing files for a user
-  - `GET /api/storedfile/details/{publicKey}`: list nodes with file details for a user
+Central API indexes placements; Store nodes hold ciphertext. Same `fileId` may appear on multiple nodes.
+
+- `POST /api/storedfile/register` — single placement (signed by owner)
+- `POST /api/storedfile/register-replicas` — batch `{ fileId, ownerPublicKey, storeNodeIds[], fileHash, fileSize }` (signed by owner)
+- `GET /api/storedfile/nodes/{publicKey}` — nodes storing a user’s files
+- `GET /api/storedfile/details/{publicKey}` — nodes with file details
+
+App sets replica count via `REPLICATION_FACTOR` (default 2) and uploads full replicas to N stores, then calls `register-replicas`.
+
+## Transactions
+
+- `POST /api/tx/submit` — signed; authenticated caller must match `From`
+- `GET /api/tx/pull` — Blocker-only; requires `X-Internal-Token` (`InternalApi:Token` / `INTERNAL_API_TOKEN`)
 
 ## Setup and Installation
 
@@ -108,23 +120,27 @@ The API will start on `http://localhost:5002` by default.
 
 ## Data Storage
 
-These files are generated at runtime and must not be committed:
+**Preferred:** MySQL (`Storage:Provider=MySql`). Set connection via User Secrets:
 
-  - `users.json`: User registration data
-  - `user_follows.json`: Follow relationships (follower → following)
-  - `nodes.json`: Store node information
-  - `vouchers.json`: Store node registration vouchers (unused/used). Copy from `vouchers.json.example` for local development.
-  - `stored_files.json`: Indexed references of files and their storage nodes
-  - `user_rekeys.json`: Cached PRE rekeys uploaded by authors (delegated generation)
-  - `central_keys.json`: Central API signing key pair. Created automatically on first run. See `central_keys.json.example`.
+```bash
+dotnet user-secrets set "ConnectionStrings:Default" "Server=...;Database=deltanium_api;..." --id deltanium-api-local-secrets
+```
+
+**JSON fallback** (local/dev only; gitignored — do not commit):
+
+- `users.json`, `user_follows.json`, `nodes.json`, `vouchers.json`, `stored_files.json`, `user_rekeys.json`
+- Examples only: `vouchers.json.example`, `central_keys.json.example`
+
+**Central signing keys:** env `CENTRAL_PUBLIC_KEY` + `CENTRAL_PRIVATE_KEY`, or `CENTRAL_KEYS_PATH` / `~/.deltanium/central_keys.json` (never commit).
 
 ## Security
 
-- Uses NBitcoin for cryptographic operations
-- Can generate secure 12-word mnemonic phrases for key recovery (via API), though clients may generate keys locally
-- Public keys are used for identity verification
-- Registration and follow/unfollow requests include signatures and timestamps (5-minute validity window) to prevent replay
-- CORS is enabled for all origins (customize as needed)
+- NBitcoin for crypto; clients should generate keys locally in production
+- Request auth: `METHOD + path+query + timestamp + sha256hex(body)` with headers `X-User-PubKey`, `X-Timestamp`, `X-Signature` (5-minute window)
+- Applied on policy uploads, stored-file register/replicas, tx submit, etc.
+- Internal token for Store/Blocker → API (`validate-token`, `tx/pull`)
+- CORS: fail-closed outside Development unless `Cors:AllowedOrigins` is set
+- Vouchers for node registration are one-shot and consumed atomically
 
 ## PRE Rekey Management (Option 3 - Delegated Generation)
 

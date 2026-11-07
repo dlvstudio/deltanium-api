@@ -2,20 +2,24 @@ obj/
 bin/
 logs/
 TestResults/
+.DS_Store
 
-# Runtime data and secrets — generated locally, never commit
+# Secrets / local keys
 users.json
+central_keys.json
+vouchers.json
+pre_nonce.json
+*.local.json
+appsettings.Development.json
+
+# Runtime JSON data (local only)
+nodes.json
+blockcreator_nodes.json
+stored_files.json
 user_follows.json
 user_rekeys.json
 chat_messages.json
 conversations.json
 online_sessions.json
 signaling_messages.json
-stored_files.json
 transactions.json
-nodes.json
-blockcreator_nodes.json
-vouchers.json
-central_keys.json
-
-.DS_Store
