@@ -1,5 +1,7 @@
+using System.IO;
 using System.Security.Cryptography;
 using System.Text;
+using DeltaniumApi.Controllers;
 using DeltaniumApi.Data;
 using DeltaniumApi.Models;
 using DeltaniumApi.Services;
@@ -284,6 +286,127 @@ namespace deltanium_api.Tests.Integration
 
             ok.Should().BeTrue(err);
             caller.Should().Be(publicKey);
+        }
+
+        [Fact]
+        public async Task RealDb_Chat_Idor_BlocksNonParticipant_AllowsParticipant()
+        {
+            RequireDb();
+
+            var alice = TestDataBuilder.CreateUser(email: $"{_tag}_chat_a@example.com");
+            var bob = TestDataBuilder.CreateUser(email: $"{_tag}_chat_b@example.com");
+            var eve = TestDataBuilder.CreateUser(email: $"{_tag}_chat_e@example.com");
+            await _sut!.SaveUserAsync(alice);
+            await _sut.SaveUserAsync(bob);
+            await _sut.SaveUserAsync(eve);
+
+            var conv = await _sut.CreateOrGetConversationAsync(alice.PublicKey, bob.PublicKey);
+            var byId = await _sut.GetConversationByIdAsync(conv.ConversationId);
+            byId.Should().NotBeNull();
+            byId!.Participants.Should().Contain(new[] { alice.PublicKey, bob.PublicKey });
+
+            // Participant can save a message metadata row
+            await _sut.SaveChatMessageAsync(new ChatMessageMetadata
+            {
+                MessageId = Guid.NewGuid().ToString("N"),
+                ConversationId = conv.ConversationId,
+                SenderPubKey = alice.PublicKey,
+                RecipientPubKey = bob.PublicKey,
+                StoreNodeId = $"{_tag}-node",
+                BlockId = $"{_tag}-block",
+                FileId = $"{_tag}-file",
+                IsRead = false,
+                CreatedAt = DateTime.UtcNow
+            });
+
+            var forAlice = await _sut.GetConversationMessagesAsync(conv.ConversationId, 0, 10);
+            forAlice.Should().Contain(m => m.SenderPubKey == alice.PublicKey);
+
+            // HTTP-level IDOR: Eve signed request must be Forbid
+            var eveMnemonic = new Mnemonic(Wordlist.English, WordCount.Twelve);
+            // Use eve's stored key? CreateUser generated its own key — sign with a fresh key matching eve.PublicKey is hard.
+            // Instead exercise controller with SignatureAuthHelper against real DB registration of Eve.
+            var mnemonic = new Mnemonic(Wordlist.English, WordCount.Twelve);
+            var eveKey = mnemonic.DeriveExtKey().PrivateKey;
+            var evePk = eveKey.PubKey.ToString();
+            await _sut.SaveUserAsync(new User
+            {
+                PublicKey = evePk,
+                Email = $"{_tag}_chat_eve2@example.com",
+                FullName = "Eve2",
+                DateOfBirth = new DateTime(1990, 1, 1),
+                Signature = "it",
+                RegistrationTimestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+                Bio = "it",
+                AvatarUrl = ""
+            });
+
+            var body = $"{{\"conversationId\":\"{conv.ConversationId}\",\"recipientPubKey\":\"{bob.PublicKey}\",\"storeNodeId\":\"n\",\"blockId\":\"b\",\"fileId\":\"f\"}}";
+            using var sha = SHA256.Create();
+            var bodyHash = Convert.ToHexString(sha.ComputeHash(Encoding.UTF8.GetBytes(body))).ToLowerInvariant();
+            var ts = DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString();
+            var path = "/api/chat/message";
+            var message = $"POST{path}{ts}{bodyHash}";
+            var sig = Convert.ToBase64String(eveKey.Sign(new uint256(sha.ComputeHash(Encoding.UTF8.GetBytes(message)))).ToDER());
+
+            var controller = new ChatController(
+                new KeyService(), _sut, new SignatureAuthHelper(new KeyService(), _sut));
+            var ctx = new Microsoft.AspNetCore.Http.DefaultHttpContext();
+            ctx.Request.Method = "POST";
+            ctx.Request.Path = path;
+            ctx.Request.Headers["X-User-PubKey"] = evePk;
+            ctx.Request.Headers["X-Timestamp"] = ts;
+            ctx.Request.Headers["X-Signature"] = sig;
+            var bytes = Encoding.UTF8.GetBytes(body);
+            ctx.Request.Body = new MemoryStream(bytes);
+            ctx.Request.ContentLength = bytes.Length;
+            controller.ControllerContext = new Microsoft.AspNetCore.Mvc.ControllerContext { HttpContext = ctx };
+
+            var forbidden = await controller.RegisterMessage();
+            forbidden.Should().BeOfType<Microsoft.AspNetCore.Mvc.ForbidResult>();
+
+            // Alice (participant) succeeds
+            var aliceMnemonic = new Mnemonic(Wordlist.English, WordCount.Twelve);
+            var aliceKey = aliceMnemonic.DeriveExtKey().PrivateKey;
+            var alicePk = aliceKey.PubKey.ToString();
+            await _sut.SaveUserAsync(new User
+            {
+                PublicKey = alicePk,
+                Email = $"{_tag}_chat_alice2@example.com",
+                FullName = "Alice2",
+                DateOfBirth = new DateTime(1990, 1, 1),
+                Signature = "it",
+                RegistrationTimestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+                Bio = "it",
+                AvatarUrl = ""
+            });
+            var conv2 = await _sut.CreateOrGetConversationAsync(alicePk, bob.PublicKey);
+            var bodyOk = $"{{\"conversationId\":\"{conv2.ConversationId}\",\"recipientPubKey\":\"{bob.PublicKey}\",\"storeNodeId\":\"n\",\"blockId\":\"b\",\"fileId\":\"f2\"}}";
+            var bodyHashOk = Convert.ToHexString(sha.ComputeHash(Encoding.UTF8.GetBytes(bodyOk))).ToLowerInvariant();
+            var tsOk = DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString();
+            var msgOk = $"POST{path}{tsOk}{bodyHashOk}";
+            var sigOk = Convert.ToBase64String(aliceKey.Sign(new uint256(sha.ComputeHash(Encoding.UTF8.GetBytes(msgOk)))).ToDER());
+
+            var ctxOk = new Microsoft.AspNetCore.Http.DefaultHttpContext();
+            ctxOk.Request.Method = "POST";
+            ctxOk.Request.Path = path;
+            ctxOk.Request.Headers["X-User-PubKey"] = alicePk;
+            ctxOk.Request.Headers["X-Timestamp"] = tsOk;
+            ctxOk.Request.Headers["X-Signature"] = sigOk;
+            var bytesOk = Encoding.UTF8.GetBytes(bodyOk);
+            ctxOk.Request.Body = new MemoryStream(bytesOk);
+            ctxOk.Request.ContentLength = bytesOk.Length;
+            controller.ControllerContext = new Microsoft.AspNetCore.Mvc.ControllerContext { HttpContext = ctxOk };
+
+            var allowed = await controller.RegisterMessage();
+            allowed.Should().BeOfType<Microsoft.AspNetCore.Mvc.OkObjectResult>();
+
+            // cleanup chat rows for this run
+            _db!.ChatMessages.RemoveRange(_db.ChatMessages.Where(m =>
+                m.ConversationId == conv.ConversationId || m.ConversationId == conv2.ConversationId));
+            _db.Conversations.RemoveRange(_db.Conversations.Where(c =>
+                c.ConversationId == conv.ConversationId || c.ConversationId == conv2.ConversationId));
+            await _db.SaveChangesAsync();
         }
     }
 }

@@ -360,6 +360,9 @@ namespace DeltaniumApi.Services
         public Task<List<Conversation>> GetConversationsAsync() =>
             _db.Conversations.AsNoTracking().ToListAsync();
 
+        public Task<Conversation?> GetConversationByIdAsync(string conversationId) =>
+            _db.Conversations.AsNoTracking().FirstOrDefaultAsync(c => c.ConversationId == conversationId);
+
         public async Task<Conversation?> GetConversationByParticipantsAsync(string pubKeyA, string pubKeyB)
         {
             var conversations = await _db.Conversations.AsNoTracking().ToListAsync();

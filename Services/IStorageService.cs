@@ -48,6 +48,7 @@ namespace DeltaniumApi.Services
         Task UpdateBlockCreatorNodeAsync(BlockCreatorNode updatedNode);
         Task<BlockCreatorNode?> GetBlockCreatorNodeByPublicKeyAsync(string publicKey);
         Task<List<Conversation>> GetConversationsAsync();
+        Task<Conversation?> GetConversationByIdAsync(string conversationId);
         Task<Conversation?> GetConversationByParticipantsAsync(string pubKeyA, string pubKeyB);
         Task<Conversation> CreateOrGetConversationAsync(string pubKeyA, string pubKeyB);
         Task<List<Conversation>> GetUserConversationsAsync(string userPubKey);

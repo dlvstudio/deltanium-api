@@ -557,6 +557,12 @@ namespace DeltaniumApi.Services
             return JsonConvert.DeserializeObject<List<Conversation>>(json) ?? new List<Conversation>();
         }
 
+        public async Task<Conversation?> GetConversationByIdAsync(string conversationId)
+        {
+            var conversations = await GetConversationsAsync();
+            return conversations.FirstOrDefault(c => c.ConversationId == conversationId);
+        }
+
         public async Task<Conversation?> GetConversationByParticipantsAsync(string pubKeyA, string pubKeyB)
         {
             var conversations = await GetConversationsAsync();
