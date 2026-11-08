@@ -1,10 +1,15 @@
 using DeltaniumApi.Data;
 using DeltaniumApi.Services;
 using DeltaniumApi.Middleware;
+using DeltaniumApi.Security;
 using Microsoft.EntityFrameworkCore;
 using Serilog;
 
+// Decrypt dpapi:* Machine/AppPool env vars before host/config bind (IIS production).
+DpapiEnvironment.ExpandProcessEnvironment();
+
 var builder = WebApplication.CreateBuilder(args);
+builder.Configuration.AddDpapiDecryptedOverrides();
 
 // Serilog daily-rolling file logger (aligned with Store)
 var logsDir = Path.Combine(Directory.GetCurrentDirectory(), "logs");
