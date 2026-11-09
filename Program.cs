@@ -5,7 +5,8 @@ using DeltaniumApi.Security;
 using Microsoft.EntityFrameworkCore;
 using Serilog;
 
-// Decrypt dpapi:* Machine/AppPool env vars before host/config bind (IIS production).
+// ProgramData secrets survive MSDeploy; then decrypt dpapi:* into process env.
+DpapiEnvironment.LoadSiteProgramDataSecrets();
 DpapiEnvironment.ExpandProcessEnvironment();
 
 var builder = WebApplication.CreateBuilder(args);
