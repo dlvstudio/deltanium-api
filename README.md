@@ -219,4 +219,4 @@ Authors generate rekeys locally and upload them to the Central API. The API stor
 
 ## License
 
-[Your License Here] 
+MIT — see [LICENSE](LICENSE). 
