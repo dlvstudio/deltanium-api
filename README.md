@@ -2,6 +2,17 @@
 
 A centralized API service for the Deltanium ecosystem, managing user registrations, store/blocker coordination, PRE rekeys, and N-of-M file placement index.
 
+## Production
+
+| | URL |
+|--|-----|
+| **Central API** | [https://api.deltanium.com](https://api.deltanium.com) |
+| Client base path | [https://api.deltanium.com/api](https://api.deltanium.com/api) |
+| App | [https://app.deltanium.com](https://app.deltanium.com) |
+| Landing | [https://deltanium.com](https://deltanium.com) |
+
+Local default: `http://127.0.0.1:5002`.
+
 ## Features
 
 - User registration with cryptographic key pairs and signature verification
