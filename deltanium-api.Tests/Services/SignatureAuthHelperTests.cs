@@ -13,6 +13,7 @@ using Xunit;
 
 namespace deltanium_api.Tests.Services
 {
+    [Collection("SuperAdminEnv")]
     public class SignatureAuthHelperTests
     {
         private readonly KeyService _keyService = new();

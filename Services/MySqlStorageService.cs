@@ -95,6 +95,15 @@ namespace DeltaniumApi.Services
             await _db.SaveChangesAsync();
         }
 
+        public async Task<bool> UpdateNodePublicKeyAsync(string nodeId, string publicKey)
+        {
+            var node = await _db.StoreNodes.FirstOrDefaultAsync(n => n.Id == nodeId);
+            if (node == null) return false;
+            node.PublicKey = publicKey;
+            await _db.SaveChangesAsync();
+            return true;
+        }
+
         public async Task SaveStoredFileAsync(StoredFile file)
         {
             _db.StoredFiles.Add(file);

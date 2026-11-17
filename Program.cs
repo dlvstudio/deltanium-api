@@ -92,10 +92,6 @@ builder.Logging.ClearProviders();
 var storageProvider = builder.Configuration["Storage:Provider"] ?? "Json";
 var connectionString = builder.Configuration.GetConnectionString("Default");
 
-// Allow INTERNAL_API_TOKEN env to override empty appsettings value
-var envInternalToken = Environment.GetEnvironmentVariable("INTERNAL_API_TOKEN");
-if (!string.IsNullOrWhiteSpace(envInternalToken))
-    builder.Configuration["InternalApi:Token"] = envInternalToken;
 
 builder.Services.AddSingleton<KeyService>();
 builder.Services.AddScoped<SignatureAuthHelper>();

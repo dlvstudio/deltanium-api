@@ -84,6 +84,8 @@ foreach ($s in $Site) {
         }
         Expect-Status (Invoke-Http GET "$b/api/wallet/admin/topups" @{ 'X-Internal-Token' = 'smoke-test' }) 401
     }
+    Check 'store rekey needs a Super Admin signature' { Expect-Status (Invoke-Http POST "$b/api/storenode/admin/rekey" @{ 'X-Internal-Token' = 'smoke-test' } '{"nodeId":"x","publicKey":"x"}') 401 }
+    Check 'PRE validate-token refuses unsigned + node token' { Expect-Status (Invoke-Http POST "$b/api/policy/validate-token" @{ 'X-Internal-Token' = 'smoke-test' } '{"token":"x"}') 401 }
     Check 'cancel-escrow refuses unsigned' { Expect-Status (Invoke-Http POST "$b/api/storedfile/cancel-escrow" @{} '{"fileId":"x"}') 401 }
     Check 'email send-code refuses unsigned' { Expect-Status (Invoke-Http POST "$b/api/email/send-code" @{} '{"email":"a@example.com"}') 401 }
     Check 'wallet balance refuses unsigned' { Expect-Status (Invoke-Http GET "$b/api/wallet/balance") 401 }

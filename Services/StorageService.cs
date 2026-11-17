@@ -149,6 +149,16 @@ namespace DeltaniumApi.Services
             await File.WriteAllTextAsync(_nodesFilePath, JsonConvert.SerializeObject(nodes, Formatting.Indented));
         }
 
+        public async Task<bool> UpdateNodePublicKeyAsync(string nodeId, string publicKey)
+        {
+            var nodes = await GetNodesAsync();
+            var node = nodes.FirstOrDefault(n => n.Id == nodeId);
+            if (node == null) return false;
+            node.PublicKey = publicKey;
+            await File.WriteAllTextAsync(_nodesFilePath, JsonConvert.SerializeObject(nodes, Formatting.Indented));
+            return true;
+        }
+
         public async Task SaveStoredFileAsync(StoredFile file)
         {
             var files = await GetStoredFilesAsync();

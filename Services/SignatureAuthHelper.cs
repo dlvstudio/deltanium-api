@@ -239,6 +239,28 @@ namespace DeltaniumApi.Services
             return (true, "", dataToSign, timestamp);
         }
 
+        /// <summary>
+        /// Super Admin request signature (X-Timestamp + X-SuperAdmin-Request-Signature over
+        /// METHOD + path+query + timestamp + sha256hex(body)); a state-changing request is accepted once.
+        /// The private key never reaches the server: requests are signed on the Super Admin's machine.
+        /// </summary>
+        public (bool Ok, string Error) ValidateSuperAdminRequest(HttpRequest request, string requestBody)
+        {
+            if (!request.Headers.TryGetValue("X-SuperAdmin-Request-Signature", out var sig) ||
+                !request.Headers.TryGetValue("X-Timestamp", out var tsHeader) ||
+                !long.TryParse(tsHeader.FirstOrDefault(), out var ts))
+                return (false, "Super Admin request signature required");
+            if ((DateTimeOffset.UtcNow - DateTimeOffset.FromUnixTimeSeconds(ts)).Duration() > MaxClockSkew)
+                return (false, "Admin timestamp expired");
+            var message = BuildSignedMessage(request.Method, $"{request.Path}{request.QueryString}", tsHeader.First()!, requestBody);
+            var superPk = _keyService.GetSuperAdminPublicKey();
+            if (string.IsNullOrWhiteSpace(superPk) || !_keyService.VerifySignature(superPk, message, sig.FirstOrDefault() ?? ""))
+                return (false, "Invalid Super Admin request signature");
+            if (!HttpMethods.IsGet(request.Method) && !TryConsumeSignature("superadmin:" + superPk, message))
+                return (false, "Request already used (replayed signature)");
+            return (true, "");
+        }
+
         public static string BuildSignedMessage(string method, string pathAndQuery, string timestamp, string requestBody)
         {
             var bodyHash = "";

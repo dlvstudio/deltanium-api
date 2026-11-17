@@ -30,10 +30,12 @@ namespace DeltaniumApi.Controllers
 
 		private readonly EconomicsService _econ;
 		private readonly IWalletService _wallet;
+		private readonly KeyService _keys;
 
 		public PolicyController(IStorageService storageService, SignatureAuthHelper auth, IConfiguration config,
-			EconomicsService econ, IWalletService wallet)
+			EconomicsService econ, IWalletService wallet, KeyService keys)
 		{
+			_keys = keys;
 			_econ = econ;
 			_wallet = wallet;
 			_storageService = storageService;
@@ -274,7 +276,7 @@ namespace DeltaniumApi.Controllers
 				if (string.Equals(mode, "client", StringComparison.OrdinalIgnoreCase))
 					return Ok(new { rekey = rekey.RkBase64, scope = rekey.Scope, tag = rekey.Tag, fileId = rekey.FileId, exp = DateTime.UtcNow.AddMinutes(5) });
 
-				var token = Convert.ToBase64String(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
+				var payloadB64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
 				{
 					followingPubKey = following,
 					followerPublicKey = requester,
@@ -283,7 +285,7 @@ namespace DeltaniumApi.Controllers
 					fileId = rekey.FileId,
 					exp = DateTime.UtcNow.AddMinutes(5)
 				})));
-				return Ok(new { token });
+				return Ok(new { token = PreTokenSigner.Issue(payloadB64, _keys) });
 			}
 			catch (Exception ex)
 			{
@@ -291,22 +293,35 @@ namespace DeltaniumApi.Controllers
 			}
 		}
 
+		/// <summary>
+		/// A Store redeems a PRE proxy token for the rekey. Only an active registered Store may call it: the request
+		/// is signed with the Store's node key (X-User-PubKey, X-Timestamp, X-Signature, SignatureAuthHelper format),
+		/// replacing the shared X-Internal-Token. The token itself must carry Central's signature.
+		/// </summary>
 		[HttpPost("validate-token")]
-		public async Task<IActionResult> ValidateToken([FromBody] JsonElement body)
+		public async Task<IActionResult> ValidateToken()
 		{
-			var expected = _config["InternalApi:Token"];
-			if (string.IsNullOrWhiteSpace(expected) ||
-			    !Request.Headers.TryGetValue("X-Internal-Token", out var provided) ||
-			    !string.Equals(provided.FirstOrDefault(), expected, StringComparison.Ordinal))
-			{
-				return Unauthorized("Store/internal token required");
-			}
+			Request.EnableBuffering();
+			string raw;
+			using (var reader = new StreamReader(Request.Body, leaveOpen: true)) raw = await reader.ReadToEndAsync();
+			Request.Body.Position = 0;
 
-			var token = body.TryGetProperty("token", out var tk) ? tk.GetString() : null;
+			var (ok, signer, err) = await _auth.ValidateAsync(Request, raw, requireRegisteredUser: false);
+			if (!ok) return Unauthorized(err);
+			var store = (await _storageService.GetActiveNodesAsync()).FirstOrDefault(n =>
+				!string.IsNullOrWhiteSpace(n.PublicKey) &&
+				string.Equals(SignatureAuthHelper.NormalizePubKey(n.PublicKey.Trim()), SignatureAuthHelper.NormalizePubKey(signer!), StringComparison.OrdinalIgnoreCase));
+			if (store == null) return StatusCode(403, "Only an active registered Store can redeem PRE tokens");
+
+			JsonElement body;
+			try { body = JsonSerializer.Deserialize<JsonElement>(raw); } catch { return BadRequest("invalid JSON"); }
+			var token = body.ValueKind == JsonValueKind.Object && body.TryGetProperty("token", out var tk) ? tk.GetString() : null;
 			if (string.IsNullOrWhiteSpace(token)) return BadRequest("token required");
+			var payloadB64 = PreTokenSigner.Verify(token, _keys);
+			if (payloadB64 == null) return Unauthorized("token not signed by Central");
 			try
 			{
-				var json = Encoding.UTF8.GetString(Convert.FromBase64String(token));
+				var json = Encoding.UTF8.GetString(Convert.FromBase64String(payloadB64));
 				var payload = JsonSerializer.Deserialize<JsonElement>(json);
 				var following = payload.TryGetProperty("followingPubKey", out var f1) ? f1.GetString() : null;
 				var follower = payload.TryGetProperty("followerPublicKey", out var f2) ? f2.GetString() : null;

@@ -598,7 +598,6 @@ namespace DeltaniumApi.Controllers
         /// 1. X-Timestamp + X-SuperAdmin-Request-Signature: Super Admin signature over
         ///    METHOD + path+query + timestamp + sha256hex(body), the format of SignatureAuthHelper (one use each).
         /// 2. X-Admin-Token equal to InternalApi:AdminToken / ADMIN_API_TOKEN (never given to nodes), if configured.
-        /// 3. The old X-Internal-Token, only while InternalApi:AdminAcceptsNodeToken=true.
         /// Returns null when authorized, otherwise the 401 to return.
         /// </summary>
         private async Task<IActionResult?> AdminDeniedAsync()
@@ -625,13 +624,6 @@ namespace DeltaniumApi.Controllers
                     System.Text.Encoding.UTF8.GetBytes(gotAdmin.FirstOrDefault() ?? ""), System.Text.Encoding.UTF8.GetBytes(adminToken)))
                 return null;
 
-            if (string.Equals(_config["InternalApi:AdminAcceptsNodeToken"], "true", StringComparison.OrdinalIgnoreCase))
-            {
-                var nodeToken = _config["InternalApi:Token"] ?? Environment.GetEnvironmentVariable("INTERNAL_API_TOKEN");
-                if (!string.IsNullOrWhiteSpace(nodeToken) && Request.Headers.TryGetValue("X-Internal-Token", out var got) &&
-                    string.Equals(got.FirstOrDefault(), nodeToken, StringComparison.Ordinal))
-                    return null;
-            }
             return Unauthorized("Admin authorization required (X-SuperAdmin-Request-Signature or X-Admin-Token)");
         }
     }

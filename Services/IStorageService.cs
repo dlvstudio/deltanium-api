@@ -18,6 +18,8 @@ namespace DeltaniumApi.Services
         Task SaveUserAsync(User user);
         Task UpdateUserAsync(User updatedUser);
         Task SaveNodeAsync(StoreNode node);
+        /// <summary>Replace a registered Store's node key (Super Admin rekey). False when the node does not exist.</summary>
+        Task<bool> UpdateNodePublicKeyAsync(string nodeId, string publicKey);
         Task SaveStoredFileAsync(StoredFile file);
         Task<bool> IsPublicKeyRegisteredAsync(string publicKey);
         Task<List<StoreNode>> GetActiveNodesAsync();

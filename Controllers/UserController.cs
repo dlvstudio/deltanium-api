@@ -375,7 +375,6 @@ namespace DeltaniumApi.Controllers
                 using var reader = new StreamReader(Request.Body);
                 requestBodyJson = await reader.ReadToEndAsync();
                 Request.Body.Position = 0;
-                Console.WriteLine($"[FOLLOW] Read body: '{requestBodyJson}'");
                 
                 // Store body in HttpContext for ValidateAuthentication to use
                 HttpContext.Items["RequestBody"] = requestBodyJson;
@@ -394,21 +393,16 @@ namespace DeltaniumApi.Controllers
 
             try
             {
-                Console.WriteLine("[FOLLOW] Authentication successful, processing follow request...");
 
                 // Parse body manually
                 FollowRequest request;
                 try
                 {
-                    Console.WriteLine($"[FOLLOW] Raw JSON to parse: '{requestBodyJson}'");
-                    Console.WriteLine($"[FOLLOW] JSON length: {requestBodyJson.Length}");
                     
                     // Try to parse as generic object first for debugging
                     var rawData = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(requestBodyJson);
-                    Console.WriteLine($"[FOLLOW] Raw data keys: {string.Join(", ", rawData.Keys)}");
                     foreach (var kvp in rawData)
                     {
-                        Console.WriteLine($"[FOLLOW] {kvp.Key}: {kvp.Value} (type: {kvp.Value.GetType()})");
                     }
                     
                     // Manual parsing using JsonElement methods
@@ -420,47 +414,35 @@ namespace DeltaniumApi.Controllers
                         Timestamp = rawData["timestamp"].GetInt64()
                     };
                     
-                    Console.WriteLine($"[FOLLOW] Manually parsed request: targetPublicKey={request.TargetPublicKey}, timestamp={request.Timestamp}");
                     
                     if (request == null || string.IsNullOrEmpty(request.TargetPublicKey))
                     {
-                        Console.WriteLine("[FOLLOW] Invalid request - null or empty targetPublicKey");
                         return BadRequest("Invalid request body");
                     }
                 }
                 catch (Exception ex)
                 {
                     Console.WriteLine($"[FOLLOW] Error parsing JSON: {ex.Message}");
-                    Console.WriteLine($"[FOLLOW] Stack trace: {ex.StackTrace}");
                     return BadRequest("Invalid JSON format");
                 }
 
                 var currentUserPublicKey = NormalizePublicKey(userPublicKey);
                 var targetPublicKey = NormalizePublicKey(request.TargetPublicKey);
 
-                Console.WriteLine($"[FOLLOW] Current user: {currentUserPublicKey}");
-                Console.WriteLine($"[FOLLOW] Target user: {targetPublicKey}");
 
                 // Validate target user exists
-                Console.WriteLine("[FOLLOW] Checking if target user exists...");
                 if (!await _storageService.IsPublicKeyRegisteredAsync(targetPublicKey))
                 {
-                    Console.WriteLine($"[FOLLOW] Target user not found: {targetPublicKey}");
                     return BadRequest("Target user not found");
                 }
 
-                Console.WriteLine($"[FOLLOW] Target user exists, attempting to follow...");
                 
                 // Verify signature on the data that client signed
-                Console.WriteLine($"[FOLLOW] Signed data from client: {request.SignedData}");
-                Console.WriteLine($"[FOLLOW] Signature from client: {request.Signature}");
                 
                 var signatureValid = _keyService.VerifySignature(currentUserPublicKey, request.SignedData, request.Signature);
-                Console.WriteLine($"[FOLLOW] Signature verification result: {signatureValid}");
                 
                 if (!signatureValid)
                 {
-                    Console.WriteLine($"[FOLLOW] Invalid signature for follow action");
                     return BadRequest("Invalid signature for follow action");
                 }
                 
@@ -473,16 +455,10 @@ namespace DeltaniumApi.Controllers
                     var followingKey = signedRecord["following"].ToString();
                     var signedTimestamp = signedRecord["timestamp"].ToString();
                     
-                    Console.WriteLine($"[FOLLOW] Signed action: {action}");
-                    Console.WriteLine($"[FOLLOW] Signed follower: {followerKey}");
-                    Console.WriteLine($"[FOLLOW] Signed following: {followingKey}");
-                    Console.WriteLine($"[FOLLOW] Signed timestamp: {signedTimestamp}");
-                    Console.WriteLine($"[FOLLOW] Request timestamp: {request.Timestamp}");
                     
                     // Validate the signed data matches the request
                     if (action != "follow" || followerKey != currentUserPublicKey || followingKey != targetPublicKey)
                     {
-                        Console.WriteLine($"[FOLLOW] Signed data doesn't match request parameters");
                         return BadRequest("Signed data doesn't match request");
                     }
                     
@@ -492,13 +468,11 @@ namespace DeltaniumApi.Controllers
                         var timeDiff = Math.Abs(request.Timestamp - parsedSignedTimestamp);
                         if (timeDiff > 300) // Allow 5 minutes difference
                         {
-                            Console.WriteLine($"[FOLLOW] Timestamp mismatch: signed={parsedSignedTimestamp}, request={request.Timestamp}, diff={timeDiff}s");
                             return BadRequest("Timestamp mismatch");
                         }
                     }
                     else
                     {
-                        Console.WriteLine($"[FOLLOW] Invalid signed timestamp format: {signedTimestamp}");
                         return BadRequest("Invalid timestamp format");
                     }
                 }
@@ -510,21 +484,16 @@ namespace DeltaniumApi.Controllers
                 
                 // Now save the follow relationship with verified signature
                 var success = await _storageService.FollowUserAsync(currentUserPublicKey, targetPublicKey, request.Signature, request.Timestamp);
-                Console.WriteLine($"[FOLLOW] Follow result: {success}");
                 
                 if (!success)
                 {
-                    Console.WriteLine($"[FOLLOW] Follow failed - already following or trying to follow yourself");
                     return BadRequest("Cannot follow user (already following or trying to follow yourself)");
                 }
 
-                Console.WriteLine($"[FOLLOW] Successfully followed user");
                 return Ok(new { message = "Successfully followed user" });
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[FOLLOW] Unexpected error: {ex.Message}");
-                Console.WriteLine($"[FOLLOW] Stack trace: {ex.StackTrace}");
                 return StatusCode(500, $"Internal server error: {ex.Message}");
             }
         }
@@ -540,7 +509,6 @@ namespace DeltaniumApi.Controllers
                 using var reader = new StreamReader(Request.Body);
                 requestBodyJson = await reader.ReadToEndAsync();
                 Request.Body.Position = 0;
-                Console.WriteLine($"[UNFOLLOW] Read body: '{requestBodyJson}'");
                 
                 // Store body in HttpContext for ValidateAuthentication to use
                 HttpContext.Items["RequestBody"] = requestBodyJson;
@@ -644,17 +612,12 @@ namespace DeltaniumApi.Controllers
         // Helper methods
         private async Task<bool> ValidateAuthentication()
         {
-            Console.WriteLine("[AUTH] Starting authentication validation");
             
             // Extract authentication headers
             if (!Request.Headers.TryGetValue("X-User-PubKey", out var publicKeyHeader) ||
                 !Request.Headers.TryGetValue("X-Timestamp", out var timestampHeader) ||
                 !Request.Headers.TryGetValue("X-Signature", out var signatureHeader))
             {
-                Console.WriteLine("[AUTH] Missing headers");
-                Console.WriteLine($"[AUTH] X-User-PubKey: {Request.Headers.ContainsKey("X-User-PubKey")}");
-                Console.WriteLine($"[AUTH] X-Timestamp: {Request.Headers.ContainsKey("X-Timestamp")}");
-                Console.WriteLine($"[AUTH] X-Signature: {Request.Headers.ContainsKey("X-Signature")}");
                 return false;
             }
 
@@ -662,13 +625,9 @@ namespace DeltaniumApi.Controllers
             var timestamp = timestampHeader.FirstOrDefault();
             var signature = signatureHeader.FirstOrDefault();
 
-            Console.WriteLine($"[AUTH] Raw publicKey: {publicKey}");
-            Console.WriteLine($"[AUTH] Timestamp: {timestamp}");
-            Console.WriteLine($"[AUTH] Signature: {signature}");
 
             if (string.IsNullOrEmpty(publicKey) || string.IsNullOrEmpty(timestamp) || string.IsNullOrEmpty(signature))
             {
-                Console.WriteLine("[AUTH] Empty headers");
                 return false;
             }
 
@@ -676,27 +635,21 @@ namespace DeltaniumApi.Controllers
             string requestBody = "";
             if (Request.Method == "POST")
             {
-                Console.WriteLine($"[AUTH] ContentLength: {Request.ContentLength}");
-                Console.WriteLine($"[AUTH] ContentType: {Request.ContentType}");
                 
                 // Try to get cached body from HttpContext.Items (set by endpoint)
                 if (HttpContext.Items.TryGetValue("RequestBody", out var cachedBody))
                 {
                     requestBody = cachedBody?.ToString() ?? "";
-                    Console.WriteLine($"[AUTH] Using cached body: '{requestBody}'");
                 }
                 else
                 {
-                    Console.WriteLine("[AUTH] No cached body found, body may have been consumed by model binding");
                     requestBody = ""; // Use empty string for hash calculation
                 }
                 
-                Console.WriteLine($"[AUTH] Request body length: {requestBody.Length}");
             }
 
             // Store original public key for signature verification
             var originalPublicKey = publicKey;
-            Console.WriteLine($"[AUTH] Original publicKey: {originalPublicKey}");
 
             // Check if user is registered with BOTH compressed and uncompressed formats
             var isRegistered = false;
@@ -707,7 +660,6 @@ namespace DeltaniumApi.Controllers
             {
                 isRegistered = true;
                 keyForSignatureVerification = originalPublicKey;
-                Console.WriteLine($"[AUTH] User found with original key format: {originalPublicKey}");
             }
             else
             {
@@ -715,13 +667,11 @@ namespace DeltaniumApi.Controllers
                 if (originalPublicKey.Length == 66 && (originalPublicKey.StartsWith("02") || originalPublicKey.StartsWith("03")))
                 {
                     var uncompressedKey = NormalizePublicKey(originalPublicKey);
-                    Console.WriteLine($"[AUTH] Trying uncompressed version: {uncompressedKey}");
                     
                     if (await _storageService.IsPublicKeyRegisteredAsync(uncompressedKey))
                     {
                         isRegistered = true;
                         keyForSignatureVerification = originalPublicKey; // Keep original for signature verification
-                        Console.WriteLine($"[AUTH] User found with uncompressed key: {uncompressedKey}");
                     }
                 }
                 // If original key is uncompressed, try compressed version
@@ -730,32 +680,27 @@ namespace DeltaniumApi.Controllers
                     try
                     {
                         var compressedKey = new NBitcoin.PubKey(originalPublicKey).ToString();
-                        Console.WriteLine($"[AUTH] Trying compressed version: {compressedKey}");
                         
                         if (await _storageService.IsPublicKeyRegisteredAsync(compressedKey))
                         {
                             isRegistered = true;
                             keyForSignatureVerification = originalPublicKey; // Keep original for signature verification
-                            Console.WriteLine($"[AUTH] User found with compressed key: {compressedKey}");
                         }
                     }
-                    catch (Exception ex)
+                    catch (Exception)
                     {
-                        Console.WriteLine($"[AUTH] Error converting to compressed key: {ex.Message}");
                     }
                 }
             }
 
             if (!isRegistered)
             {
-                Console.WriteLine($"[AUTH] Public key not registered in any format: {originalPublicKey}");
                 return false;
             }
 
             // Validate timestamp (allow 5 minutes window)
             if (!long.TryParse(timestamp, out var timestampLong))
             {
-                Console.WriteLine($"[AUTH] Invalid timestamp format: {timestamp}");
                 return false;
             }
 
@@ -763,13 +708,9 @@ namespace DeltaniumApi.Controllers
             var now = DateTimeOffset.UtcNow;
             var timeDiff = Math.Abs((now - requestTime).TotalMinutes);
             
-            Console.WriteLine($"[AUTH] Request time: {requestTime}");
-            Console.WriteLine($"[AUTH] Current time: {now}");
-            Console.WriteLine($"[AUTH] Time difference: {timeDiff} minutes");
             
             if (timeDiff > 5) // 5 minutes window
             {
-                Console.WriteLine($"[AUTH] Timestamp too old: {timeDiff} minutes");
                 return false;
             }
 
@@ -778,8 +719,6 @@ namespace DeltaniumApi.Controllers
             var path = Request.Path + Request.QueryString;
             var bodyHash = "";
 
-            Console.WriteLine($"[AUTH] Method: {method}");
-            Console.WriteLine($"[AUTH] Path: {path}");
 
             // For POST requests, hash the body (always for POST, even if empty)
             if (Request.Method == "POST")
@@ -788,16 +727,12 @@ namespace DeltaniumApi.Controllers
                 var bodyBytes = Encoding.UTF8.GetBytes(requestBody); // Will be empty string if no body
                 var hashBytes = sha256.ComputeHash(bodyBytes);
                 bodyHash = Convert.ToHexString(hashBytes).ToLower();
-                Console.WriteLine($"[AUTH] Body hash: {bodyHash}");
             }
 
             var dataToSign = $"{method}{path}{timestamp}{bodyHash}";
-            Console.WriteLine($"[AUTH] Data to sign: {dataToSign}");
 
             // Verify signature using the key format found in database
             var verificationResult = _keyService.VerifySignature(keyForSignatureVerification, dataToSign, signature);
-            Console.WriteLine($"[AUTH] Signature verification result: {verificationResult}");
-            Console.WriteLine($"[AUTH] Used key for verification: {keyForSignatureVerification}");
             
             return verificationResult;
         }

@@ -104,16 +104,12 @@ namespace DeltaniumApi.Services
 
         /// <summary>
         /// Authenticate a call to a Store's internal endpoint: Central signature (Stores verify it with the
-        /// Central public key) plus the legacy shared token while older Stores still expect it.
+        /// Central public key). The shared node token is gone.
         /// </summary>
         private void AuthorizeStoreCall(HttpRequestMessage req, string? body)
         {
             if (_keys != null) CentralRequestSigner.Sign(req, body, _keys);
-            if (!string.IsNullOrWhiteSpace(InternalToken)) req.Headers.TryAddWithoutValidation("X-Internal-Token", InternalToken);
         }
-
-        private string? InternalToken =>
-            _config["InternalApi:Token"] ?? Environment.GetEnvironmentVariable("INTERNAL_API_TOKEN");
 
         public static string Epoch(DateTime utc) => utc.ToString("yyyy-MM", CultureInfo.InvariantCulture);
 
