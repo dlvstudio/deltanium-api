@@ -26,6 +26,10 @@ namespace DeltaniumApi.Data
         public DbSet<OnlineSession> OnlineSessions => Set<OnlineSession>();
         public DbSet<SignalingMessage> SignalingMessages => Set<SignalingMessage>();
         public DbSet<TransactionEnvelopeRecord> TransactionEnvelopes => Set<TransactionEnvelopeRecord>();
+        public DbSet<WalletAccount> WalletAccounts => Set<WalletAccount>();
+        public DbSet<WalletLedgerEntry> WalletLedger => Set<WalletLedgerEntry>();
+        public DbSet<TopUpOrder> TopUpOrders => Set<TopUpOrder>();
+        public DbSet<EconDoc> EconDocs => Set<EconDoc>();
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
@@ -164,6 +168,57 @@ namespace DeltaniumApi.Data
                 e.HasIndex(x => x.Delivered);
                 e.Property(x => x.Id).HasMaxLength(64);
                 e.Property(x => x.TransactionJson).HasColumnType("longtext").IsRequired();
+            });
+
+            modelBuilder.Entity<WalletAccount>(e =>
+            {
+                e.ToTable("wallet_accounts");
+                e.HasKey(x => x.PublicKey);
+                e.Property(x => x.PublicKey).HasMaxLength(200);
+                e.Property(x => x.Balance).HasPrecision(28, 10);
+            });
+
+            modelBuilder.Entity<WalletLedgerEntry>(e =>
+            {
+                e.ToTable("wallet_ledger");
+                e.HasKey(x => x.Id);
+                e.Property(x => x.Id).HasMaxLength(64);
+                e.Property(x => x.FromPublicKey).HasMaxLength(200);
+                e.Property(x => x.ToPublicKey).HasMaxLength(200);
+                e.Property(x => x.Amount).HasPrecision(28, 10);
+                e.Property(x => x.Kind).HasMaxLength(32);
+                e.Property(x => x.RefId).HasMaxLength(64);
+                e.Property(x => x.Memo).HasMaxLength(512);
+                e.HasIndex(x => x.FromPublicKey);
+                e.HasIndex(x => x.ToPublicKey);
+                e.HasIndex(x => x.CreatedAt);
+            });
+
+            modelBuilder.Entity<TopUpOrder>(e =>
+            {
+                e.ToTable("topup_orders");
+                e.HasKey(x => x.Id);
+                e.Property(x => x.Id).HasMaxLength(64);
+                e.Property(x => x.BuyerPublicKey).HasMaxLength(130);
+                e.Property(x => x.FiatAmountVnd).HasPrecision(28, 2);
+                e.Property(x => x.FeePercent).HasPrecision(8, 4);
+                e.Property(x => x.DCredited).HasPrecision(28, 10);
+                e.Property(x => x.PlatformFiatVnd).HasPrecision(28, 2);
+                e.Property(x => x.NetworkReserveFiatVnd).HasPrecision(28, 2);
+                e.Property(x => x.Status).HasMaxLength(32);
+                e.Property(x => x.NetworkTxId).HasMaxLength(64);
+                e.Property(x => x.Channel).HasMaxLength(16);
+                e.HasIndex(x => x.BuyerPublicKey);
+                e.HasIndex(x => x.Status);
+            });
+
+            modelBuilder.Entity<EconDoc>(e =>
+            {
+                e.ToTable("econ_docs");
+                e.HasKey(x => new { x.Collection, x.Id });
+                e.Property(x => x.Collection).HasMaxLength(48);
+                e.Property(x => x.Id).HasMaxLength(200);
+                e.Property(x => x.Json).HasColumnType("longtext").IsRequired();
             });
         }
     }

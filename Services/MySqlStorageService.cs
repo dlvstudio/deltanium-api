@@ -354,6 +354,31 @@ namespace DeltaniumApi.Services
             await _db.SaveChangesAsync();
         }
 
+        public async Task TouchNodeLastSeenAsync(string role, string publicKey, DateTime seenAtUtc)
+        {
+            if (role == "store")
+            {
+                var n = await _db.StoreNodes.FirstOrDefaultAsync(x => x.PublicKey == publicKey);
+                if (n == null) return;
+                n.LastSeen = seenAtUtc;
+            }
+            else
+            {
+                var b = await _db.BlockCreatorNodes.FirstOrDefaultAsync(x => x.PublicKey == publicKey);
+                if (b == null) return;
+                b.LastSeen = seenAtUtc;
+            }
+            await _db.SaveChangesAsync();
+        }
+
+        public async Task DeactivateStoredFileAsync(string fileId)
+        {
+            var rows = await _db.StoredFiles.Where(f => f.FileId == fileId && f.IsActive).ToListAsync();
+            if (rows.Count == 0) return;
+            foreach (var r in rows) r.IsActive = false;
+            await _db.SaveChangesAsync();
+        }
+
         public Task<BlockCreatorNode?> GetBlockCreatorNodeByPublicKeyAsync(string publicKey) =>
             _db.BlockCreatorNodes.AsNoTracking().FirstOrDefaultAsync(n => n.PublicKey == publicKey);
 

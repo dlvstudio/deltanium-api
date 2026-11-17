@@ -52,10 +52,28 @@ namespace DeltaniumApi.Controllers
             public string CentralPublicKey { get; set; } = string.Empty;
         }
 
-        public BlockCreatorNodeController(KeyService keyService, IStorageService storageService)
+        private readonly EconomicsService _econ;
+        private readonly IWalletService _wallet;
+
+        public BlockCreatorNodeController(KeyService keyService, IStorageService storageService,
+            EconomicsService econ, IWalletService wallet)
         {
             _keyService = keyService;
             _storageService = storageService;
+            _econ = econ;
+            _wallet = wallet;
+        }
+
+        /// <summary>
+        /// Canonical string Central signs for a block slot. Anchor fields are appended only when present
+        /// so blockers running the pre-anchor format keep verifying.
+        /// </summary>
+        public static string BlockSlotSignString(BlockSlotPayload p)
+        {
+            var s = $"BLOCK_SLOT|{p.BlockerPubKey}|{p.IssuedAt}|{p.ExpiresAt}|{p.Nonce}|{p.Granted}";
+            if (!string.IsNullOrEmpty(p.LedgerRoot))
+                s += $"|{p.LedgerAnchorSeq}|{p.LedgerRoot}|{p.BalancesRoot}";
+            return s;
         }
 
         [HttpPost("register")]
@@ -164,6 +182,10 @@ namespace DeltaniumApi.Controllers
             public long ExpiresAt { get; set; }
             public string Nonce { get; set; } = string.Empty;
             public bool Granted { get; set; }
+            /// <summary>TOKENOMICS_V2 §11: wallet ledger anchor to embed in the block (granted slots only).</summary>
+            public long LedgerAnchorSeq { get; set; }
+            public string LedgerRoot { get; set; } = string.Empty;
+            public string BalancesRoot { get; set; } = string.Empty;
         }
 
         public class BlockSlotResponse
@@ -182,11 +204,11 @@ namespace DeltaniumApi.Controllers
 
             var nodes = await _storageService.GetActiveBlockCreatorNodesAsync();
             var granted = false;
-            if (nodes.Count > 0)
-            {
-                var selected = nodes[new Random().Next(nodes.Count)];
+            await _wallet.EnsureReadyAsync();
+            // v2 §8: weighted by (bond + 1) × uptime; nodes under the minimum bond are skipped when bonds are enforced.
+            var selected = await _econ.PickBlockerAsync(nodes);
+            if (selected != null)
                 granted = string.Equals(selected.PublicKey, request.BlockerPubKey, StringComparison.OrdinalIgnoreCase);
-            }
 
             var issuedAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
             var expiresAt = issuedAt + 120;
@@ -199,7 +221,16 @@ namespace DeltaniumApi.Controllers
                 Nonce = nonce,
                 Granted = granted
             };
-            var toSign = $"BLOCK_SLOT|{payload.BlockerPubKey}|{payload.IssuedAt}|{payload.ExpiresAt}|{payload.Nonce}|{payload.Granted}";
+            if (granted)
+            {
+                // v2 §11 phase A: anchor the wallet ledger into this block; §5: pay pending tx fees to this blocker.
+                var anchor = await _econ.CreateAnchorAsync(request.BlockerPubKey);
+                payload.LedgerAnchorSeq = anchor.Seq;
+                payload.LedgerRoot = anchor.LedgerRoot;
+                payload.BalancesRoot = anchor.BalancesRoot;
+                await _econ.PayoutBlockerPoolAsync(selected!.PublicKey);
+            }
+            var toSign = BlockSlotSignString(payload);
             var signature = _keyService.SignDecision(toSign);
 
             return new BlockSlotResponse

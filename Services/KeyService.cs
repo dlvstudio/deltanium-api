@@ -19,6 +19,17 @@ namespace DeltaniumApi.Services
                 ".deltanium",
                 "central_keys.json");
 
+        /// <summary>
+        /// Super Admin: prefer env SUPER_ADMIN_PUBLIC_KEY (+ optional SUPER_ADMIN_PRIVATE_KEY for local signing tools).
+        /// Production should store only the public key on the API host; private key stays with the human Super Admin.
+        /// </summary>
+        private static readonly string SuperAdminKeyFile =
+            Environment.GetEnvironmentVariable("SUPER_ADMIN_KEYS_PATH")
+            ?? Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                ".deltanium",
+                "super_admin_keys.json");
+
         public (string mnemonic, string publicKey) GenerateKeyPair()
         {
             var mnemonic = new Mnemonic(Wordlist.English, WordCount.Twelve);
@@ -46,7 +57,7 @@ namespace DeltaniumApi.Services
             {
                 var pubKey = new PubKey(publicKey);
                 using var sha256 = SHA256.Create();
-                var hashBytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(message));
+                var hashBytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(NetworkScope.Scope(message)));
                 var signatureBytes = Convert.FromBase64String(signature);
                 var hashLE = new uint256(hashBytes);
                 var hashBE = new uint256(hashBytes, lendian: false);
@@ -72,51 +83,161 @@ namespace DeltaniumApi.Services
         public string SignDecision(string message)
         {
             var pair = GetOrCreateCentralKeyPair();
-            var key = new Key(Convert.FromHexString(pair.privateKey));
+            return SignWithPrivateHex(pair.privateKey, message);
+        }
+
+        public string GetSuperAdminPublicKey()
+        {
+            var pair = LoadSuperAdminKeyPair();
+            return pair.publicKey;
+        }
+
+        /// <summary>
+        /// True when this process can sign as Super Admin (dev / Super Admin workstation only).
+        /// Production API should have public key only → returns false.
+        /// </summary>
+        public bool CanSignAsSuperAdmin()
+        {
+            var pair = LoadSuperAdminKeyPair();
+            return !string.IsNullOrWhiteSpace(pair.privateKey);
+        }
+
+        public string SignAsSuperAdmin(string message)
+        {
+            var pair = LoadSuperAdminKeyPair();
+            if (string.IsNullOrWhiteSpace(pair.privateKey))
+                throw new InvalidOperationException(
+                    "Super Admin private key is not available on this host (expected for production).");
+            return SignWithPrivateHex(pair.privateKey, message);
+        }
+
+        /// <summary>
+        /// Explicit one-shot generate for Scripts / <c>dotnet run -- --generate-super-admin-keys</c>.
+        /// Writes JSON + PDF backup. Does not run during normal API startup.
+        /// </summary>
+        public static (string JsonPath, string PdfPath) GenerateSuperAdminKeysFile(
+            string? outputPath = null, bool overwrite = false)
+        {
+            var path = string.IsNullOrWhiteSpace(outputPath) ? SuperAdminKeyFile : outputPath;
+            if (!path.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+                path += ".json";
+            var pdfPath = Path.ChangeExtension(path, ".pdf");
+
+            if ((File.Exists(path) || File.Exists(pdfPath)) && !overwrite)
+                throw new InvalidOperationException(
+                    $"Refusing to overwrite existing {path} / {pdfPath}. Pass --overwrite or delete the files.");
+
+            var newKey = new Key();
+            var info = new KeyPairInfo
+            {
+                PublicKey = newKey.PubKey.ToHex(),
+                PrivateKey = newKey.ToHex()
+            };
+            var dir = Path.GetDirectoryName(path);
+            if (!string.IsNullOrEmpty(dir))
+                Directory.CreateDirectory(dir);
+            File.WriteAllText(path, JsonSerializer.Serialize(info, new JsonSerializerOptions { WriteIndented = true }));
+            SuperAdminKeyPdf.Write(pdfPath, info.PublicKey, info.PrivateKey);
+            return (path, pdfPath);
+        }
+
+        private static string SignWithPrivateHex(string privateKeyHex, string message)
+        {
+            var key = new Key(Convert.FromHexString(privateKeyHex));
             using var sha256 = SHA256.Create();
-            var hashBytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(message));
+            var hashBytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(NetworkScope.Scope(message)));
             var sig = key.Sign(new uint256(hashBytes));
             return Convert.ToBase64String(sig.ToDER());
         }
 
         private (string publicKey, string privateKey) GetOrCreateCentralKeyPair()
         {
-            var envPub = Environment.GetEnvironmentVariable("CENTRAL_PUBLIC_KEY");
-            var envPriv = Environment.GetEnvironmentVariable("CENTRAL_PRIVATE_KEY");
+            return LoadOrCreateKeyPair(
+                "CENTRAL_PUBLIC_KEY",
+                "CENTRAL_PRIVATE_KEY",
+                CentralKeyFile,
+                "central");
+        }
+
+        /// <summary>
+        /// Load only — never auto-creates. Generate via
+        /// <c>dotnet run --project deltanium-api -- --generate-super-admin-keys</c>
+        /// or Scripts/Generate-SuperAdminKeys.ps1.
+        /// </summary>
+        private (string publicKey, string privateKey) LoadSuperAdminKeyPair()
+        {
+            var envPub = Environment.GetEnvironmentVariable("SUPER_ADMIN_PUBLIC_KEY");
+            var envPriv = Environment.GetEnvironmentVariable("SUPER_ADMIN_PRIVATE_KEY");
+
+            // Production shape: public key only on API host
+            if (!string.IsNullOrWhiteSpace(envPub) && string.IsNullOrWhiteSpace(envPriv))
+                return (envPub.Trim(), "");
+
             if (!string.IsNullOrWhiteSpace(envPub) && !string.IsNullOrWhiteSpace(envPriv))
                 return (envPub.Trim(), envPriv.Trim());
 
             try
             {
-                if (File.Exists(CentralKeyFile))
+                if (File.Exists(SuperAdminKeyFile))
                 {
-                    var json = File.ReadAllText(CentralKeyFile);
-                    var info = JsonSerializer.Deserialize<CentralKeyInfo>(json);
+                    var json = File.ReadAllText(SuperAdminKeyFile);
+                    var info = JsonSerializer.Deserialize<KeyPairInfo>(json);
+                    if (info != null && !string.IsNullOrWhiteSpace(info.PublicKey))
+                        return (info.PublicKey, info.PrivateKey ?? "");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[KeyService] Error reading {SuperAdminKeyFile}: {ex.Message}");
+            }
+
+            throw new InvalidOperationException(
+                "Super Admin public key not configured. On your laptop run: " +
+                "dotnet run --project deltanium-api -- --generate-super-admin-keys " +
+                $"(writes {SuperAdminKeyFile}). Then set SUPER_ADMIN_PUBLIC_KEY on API + blockers; keep PrivateKey offline.");
+        }
+
+        private static (string publicKey, string privateKey) LoadOrCreateKeyPair(
+            string envPubName,
+            string envPrivName,
+            string filePath,
+            string label)
+        {
+            var envPub = Environment.GetEnvironmentVariable(envPubName);
+            var envPriv = Environment.GetEnvironmentVariable(envPrivName);
+            if (!string.IsNullOrWhiteSpace(envPub) && !string.IsNullOrWhiteSpace(envPriv))
+                return (envPub.Trim(), envPriv.Trim());
+
+            try
+            {
+                if (File.Exists(filePath))
+                {
+                    var json = File.ReadAllText(filePath);
+                    var info = JsonSerializer.Deserialize<KeyPairInfo>(json);
                     if (info != null && !string.IsNullOrWhiteSpace(info.PrivateKey))
                         return (info.PublicKey, info.PrivateKey);
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[KeyService] Error reading {CentralKeyFile}: {ex.Message}");
+                Console.WriteLine($"[KeyService] Error reading {filePath}: {ex.Message}");
             }
 
-            // Dev-only fallback: write outside repo (gitignored path under home)
             var newKey = new Key();
-            var newInfo = new CentralKeyInfo
+            var newInfo = new KeyPairInfo
             {
                 PublicKey = newKey.PubKey.ToHex(),
                 PrivateKey = newKey.ToHex()
             };
-            var dir = Path.GetDirectoryName(CentralKeyFile);
+            var dir = Path.GetDirectoryName(filePath);
             if (!string.IsNullOrEmpty(dir))
                 Directory.CreateDirectory(dir);
-            File.WriteAllText(CentralKeyFile, JsonSerializer.Serialize(newInfo, new JsonSerializerOptions { WriteIndented = true }));
-            Console.WriteLine($"[KeyService] Generated new central keys at {CentralKeyFile} (not for production)");
+            File.WriteAllText(filePath, JsonSerializer.Serialize(newInfo, new JsonSerializerOptions { WriteIndented = true }));
+            Console.WriteLine($"[KeyService] Generated new {label} keys at {filePath} (not for production)");
             return (newInfo.PublicKey, newInfo.PrivateKey);
         }
 
-        private class CentralKeyInfo
+        private class KeyPairInfo
         {
             public string PublicKey { get; set; } = string.Empty;
             public string PrivateKey { get; set; } = string.Empty;

@@ -47,6 +47,10 @@ namespace DeltaniumApi.Services
         Task SaveBlockCreatorNodeAsync(BlockCreatorNode node);
         Task UpdateBlockCreatorNodeAsync(BlockCreatorNode updatedNode);
         Task<BlockCreatorNode?> GetBlockCreatorNodeByPublicKeyAsync(string publicKey);
+        /// <summary>Record that a node answered a liveness probe (registry LastSeen; used for blocker uptime).</summary>
+        Task TouchNodeLastSeenAsync(string role, string publicKey, DateTime seenAtUtc) => Task.CompletedTask;
+        /// <summary>Mark every placement of a file inactive (its storage contract was cancelled).</summary>
+        Task DeactivateStoredFileAsync(string fileId) => Task.CompletedTask;
         Task<List<Conversation>> GetConversationsAsync();
         Task<Conversation?> GetConversationByIdAsync(string conversationId);
         Task<Conversation?> GetConversationByParticipantsAsync(string pubKeyA, string pubKeyB);

@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Deltanium — Top-up admin</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --panel: #1a222c;
+      --text: #e8eef4;
+      --muted: #8b9aab;
+      --accent: #3d9cf0;
+      --ok: #3ecf8e;
+      --warn: #e6a23c;
+      --err: #e85d5d;
+      --line: #2a3542;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+      background: radial-gradient(1200px 600px at 10% -10%, #1a2a3a 0%, var(--bg) 55%);
+      color: var(--text);
+      min-height: 100vh;
+      padding: 2rem 1.25rem 3rem;
+    }
+    h1 { font-size: 1.35rem; font-weight: 600; margin: 0 0 0.35rem; letter-spacing: 0.02em; }
+    .sub { color: var(--muted); font-size: 0.9rem; margin-bottom: 1.5rem; max-width: 44rem; line-height: 1.45; }
+    .row { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: end; margin-bottom: 1.25rem; }
+    label { display: flex; flex-direction: column; gap: 0.35rem; font-size: 0.75rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+    input, select {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      color: var(--text);
+      padding: 0.55rem 0.7rem;
+      border-radius: 6px;
+      min-width: 16rem;
+      font-size: 0.95rem;
+    }
+    button {
+      background: var(--accent);
+      color: #061018;
+      border: 0;
+      border-radius: 6px;
+      padding: 0.6rem 1rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button.ghost { background: transparent; color: var(--text); border: 1px solid var(--line); }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    button.approve { background: var(--ok); }
+    .msg { margin: 0.75rem 0 1rem; font-size: 0.9rem; min-height: 1.2em; }
+    .msg.err { color: var(--err); }
+    .msg.ok { color: var(--ok); }
+    table { width: 100%; border-collapse: collapse; background: var(--panel); border-radius: 8px; overflow: hidden; }
+    th, td { text-align: left; padding: 0.7rem 0.85rem; border-bottom: 1px solid var(--line); font-size: 0.88rem; vertical-align: top; }
+    th { color: var(--muted); font-weight: 500; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; }
+    code { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 0.8rem; word-break: break-all; }
+    .pk { max-width: 12rem; display: inline-block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .status-pending { color: var(--warn); }
+    .status-completed { color: var(--ok); }
+    .meta { color: var(--muted); font-size: 0.8rem; margin-top: 1rem; line-height: 1.5; }
+    .note { font-size: 0.8rem; color: var(--muted); max-width: 44rem; margin: -0.5rem 0 1rem; }
+  </style>
+</head>
+<body>
+  <h1>Top-up admin</h1>
+  <p class="sub">
+    Dual control on a <strong>network TopUp tx</strong>: Super Admin signs the SignPayload locally;
+    API adds the Central signature, submits to blockers, then credits D from treasury.
+    Private key never leaves this browser.
+  </p>
+
+  <div class="row">
+    <label>API base
+      <input id="apiBase" value="" placeholder="https://api.deltanium.com" />
+    </label>
+    <label>Admin token (optional; the Super Admin key below is enough)
+      <input id="token" type="password" autocomplete="off" placeholder="ADMIN_API_TOKEN" />
+    </label>
+    <label>Status
+      <select id="status">
+        <option value="pending" selected>pending</option>
+        <option value="completed">completed</option>
+        <option value="all">all</option>
+      </select>
+    </label>
+    <button type="button" id="btnLoad">Load</button>
+    <button type="button" class="ghost" id="btnSave">Remember</button>
+  </div>
+
+  <div class="row">
+    <label>Super Admin private key (hex, this session only)
+      <input id="saPriv" type="password" autocomplete="off" placeholder="SUPER_ADMIN_PRIVATE_KEY" />
+    </label>
+  </div>
+  <p class="note">Approve signs <code>signPayload</code> from the API (TopUp network message), not the HTTP body.</p>
+
+  <p class="msg" id="msg"></p>
+  <div id="tableWrap"></div>
+  <p class="meta" id="meta"></p>
+
+  <script type="module">
+    import * as secp from "https://esm.sh/@noble/secp256k1@2.1.0";
+    import { sha256 } from "https://esm.sh/@noble/hashes@1.5.0/sha256";
+    import { hexToBytes } from "https://esm.sh/@noble/hashes@1.5.0/utils";
+
+    secp.etc.sha256Sync = (...msgs) => sha256(secp.etc.concatBytes(...msgs));
+
+    const $ = (id) => document.getElementById(id);
+    $("apiBase").value = localStorage.getItem("dt_admin_api") || location.origin;
+    $("token").value = sessionStorage.getItem("dt_admin_token") || "";
+    $("saPriv").value = sessionStorage.getItem("dt_sa_priv") || "";
+
+    let lastOrders = [];
+
+    $("btnSave").onclick = () => {
+      localStorage.setItem("dt_admin_api", $("apiBase").value.trim().replace(/\/$/, ""));
+      sessionStorage.setItem("dt_admin_token", $("token").value);
+      sessionStorage.setItem("dt_sa_priv", $("saPriv").value);
+      setMsg("Saved in this browser session.", false);
+    };
+
+    function setMsg(text, isErr) {
+      const el = $("msg");
+      el.textContent = text || "";
+      el.className = "msg " + (isErr ? "err" : "ok");
+    }
+
+    function shortPk(pk) {
+      if (!pk || pk.length < 16) return pk || "";
+      return pk.slice(0, 8) + "…" + pk.slice(-6);
+    }
+
+    // Signatures are scoped to the network like NetworkScope.Scope on the servers ("" on mainnet).
+    let networkId = null;
+    async function getNetworkId(base) {
+      if (networkId !== null) return networkId;
+      const v = await fetch(`${base}/api/version`).then(r => r.json());
+      networkId = (!v.network || v.network === "mainnet") ? "" : v.network;
+      return networkId;
+    }
+
+    async function signSuperAdmin(message, privHex) {
+      const priv = hexToBytes(privHex.trim());
+      const scoped = networkId ? networkId + "\n" + message : message;
+      const hash = sha256(new TextEncoder().encode(scoped));
+      const sig = await secp.signAsync(hash, priv, { lowS: true });
+      const der = sig.toDERRawBytes();
+      let bin = "";
+      der.forEach((b) => { bin += String.fromCharCode(b); });
+      return btoa(bin);
+    }
+
+    async function load() {
+      const base = $("apiBase").value.trim().replace(/\/$/, "");
+      const token = $("token").value;
+      const priv = $("saPriv").value.trim();
+      if (!token && !priv) { setMsg("Super Admin private key (or admin token) required.", true); return; }
+      setMsg("Loading…", false);
+      try {
+        const status = $("status").value;
+        await getNetworkId(base);
+        const path = `/api/wallet/admin/topups?status=${encodeURIComponent(status)}&limit=100`;
+        let headers;
+        if (priv) {
+          // Super Admin signature over the request: METHOD + path+query + timestamp (GET has no body hash).
+          const ts = String(Math.floor(Date.now() / 1000));
+          headers = { "X-Timestamp": ts, "X-SuperAdmin-Request-Signature": await signSuperAdmin("GET" + path + ts, priv) };
+        } else {
+          headers = { "X-Admin-Token": token };
+        }
+        const res = await fetch(`${base}${path}`, { headers });
+        const text = await res.text();
+        let data;
+        try { data = JSON.parse(text); } catch { data = text; }
+        if (!res.ok) {
+          setMsg(typeof data === "string" ? data : (data.title || data || res.statusText), true);
+          return;
+        }
+        lastOrders = data.orders || [];
+        $("meta").innerHTML =
+          "Central public key: <code>" + (data.centralPublicKey || "(unknown)") + "</code><br/>" +
+          "Super Admin public key: <code>" + (data.superAdminPublicKey || "(unknown)") + "</code>";
+        if (!lastOrders.length) {
+          $("tableWrap").innerHTML = "<p class='msg'>No orders.</p>";
+          setMsg("Done.", false);
+          return;
+        }
+        const rows = lastOrders.map(o => {
+          const canApprove = o.status === "pending" && o.signPayload;
+          return `<tr>
+            <td><code>${o.id}</code></td>
+            <td><code class="pk" title="${o.buyerPublicKey}">${shortPk(o.buyerPublicKey)}</code></td>
+            <td>${Number(o.fiatAmountVnd).toLocaleString()} VND</td>
+            <td>${o.dCredited} D</td>
+            <td class="status-${o.status}">${o.status}</td>
+            <td>${o.createdAt ? new Date(o.createdAt).toLocaleString() : ""}</td>
+            <td>${canApprove
+              ? `<button type="button" class="approve" data-id="${o.id}">Approve</button>`
+              : "—"}</td>
+          </tr>`;
+        }).join("");
+        $("tableWrap").innerHTML = `<table>
+          <thead><tr>
+            <th>Order</th><th>Buyer</th><th>Fiat</th><th>Credit</th><th>Status</th><th>Created</th><th></th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>`;
+        $("tableWrap").querySelectorAll("button.approve").forEach(btn => {
+          btn.onclick = () => approve(btn.getAttribute("data-id"), btn);
+        });
+        setMsg(`Loaded ${lastOrders.length} order(s).`, false);
+      } catch (e) {
+        setMsg(String(e.message || e), true);
+      }
+    }
+
+    async function approve(orderId, btn) {
+      if (!confirm("Confirm fiat received. This submits a TopUp network tx then credits D for " + orderId + ".")) return;
+      const order = lastOrders.find(o => o.id === orderId);
+      if (!order || !order.signPayload) {
+        setMsg("Missing signPayload for order; reload.", true);
+        return;
+      }
+
+      const base = $("apiBase").value.trim().replace(/\/$/, "");
+      await getNetworkId(base);
+      let saSig = "";
+      const priv = $("saPriv").value.trim();
+      if (priv) {
+        try {
+          saSig = await signSuperAdmin(order.signPayload, priv);
+        } catch (e) {
+          setMsg("Super Admin sign failed: " + (e.message || e), true);
+          return;
+        }
+      } else {
+        saSig = prompt("Paste X-SuperAdmin-Signature for SignPayload:\n" + order.signPayload, "") || "";
+        if (!saSig) { setMsg("Super Admin signature required.", true); return; }
+      }
+
+      btn.disabled = true;
+      setMsg("Submitting TopUp network tx for " + orderId + "…", false);
+      try {
+        const res = await fetch(`${base}/api/wallet/admin/topup/approve`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-SuperAdmin-Signature": saSig
+          },
+          body: JSON.stringify({ orderId })
+        });
+        const text = await res.text();
+        let data;
+        try { data = JSON.parse(text); } catch { data = text; }
+        if (!res.ok) {
+          setMsg(typeof data === "string" ? data : (data.title || JSON.stringify(data) || res.statusText), true);
+          btn.disabled = false;
+          return;
+        }
+        setMsg("Completed " + orderId + " (network TopUp + ledger credit).", false);
+        await load();
+      } catch (e) {
+        setMsg(String(e.message || e), true);
+        btn.disabled = false;
+      }
+    }
+
+    $("btnLoad").onclick = load;
+  </script>
+</body>
+</html>

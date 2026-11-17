@@ -2,17 +2,6 @@
 
 A centralized API service for the Deltanium ecosystem, managing user registrations, store/blocker coordination, PRE rekeys, and N-of-M file placement index.
 
-## Production
-
-| | URL |
-|--|-----|
-| **Central API** | [https://api.deltanium.com](https://api.deltanium.com) |
-| Client base path | [https://api.deltanium.com/api](https://api.deltanium.com/api) |
-| App | [https://app.deltanium.com](https://app.deltanium.com) |
-| Landing | [https://deltanium.com](https://deltanium.com) |
-
-Local default: `http://127.0.0.1:5002`.
-
 ## Features
 
 - User registration with cryptographic key pairs and signature verification
@@ -144,6 +133,15 @@ dotnet user-secrets set "ConnectionStrings:Default" "Server=...;Database=deltani
 
 **Central signing keys:** env `CENTRAL_PUBLIC_KEY` + `CENTRAL_PRIVATE_KEY`, or `CENTRAL_KEYS_PATH` / `~/.deltanium/central_keys.json` (never commit).
 
+**Super Admin (top-up dual control):** generate once on your laptop (API does **not** auto-create on run):
+
+```bash
+dotnet run --project deltanium-api --no-launch-profile -- --generate-super-admin-keys
+# or: Scripts/Generate-SuperAdminKeys.ps1
+```
+
+Writes `~/.deltanium/super_admin_keys.json` **and** `super_admin_keys.pdf` (backup chứa PublicKey + PrivateKey). Set only `SUPER_ADMIN_PUBLIC_KEY` on API + blockers; keep both files offline.
+
 ## Security
 
 - NBitcoin for crypto; clients should generate keys locally in production
@@ -219,4 +217,4 @@ Authors generate rekeys locally and upload them to the Central API. The API stor
 
 ## License
 
-MIT — see [LICENSE](LICENSE). 
+[Your License Here] 

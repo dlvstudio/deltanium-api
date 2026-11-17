@@ -6,7 +6,13 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>deltanium_api</RootNamespace>
     <UserSecretsId>deltanium-api-local-secrets</UserSecretsId>
+    <Version>1.2.0</Version>
+    <!-- Bump on each release. The commit comes from /p:SourceRevisionId=$(Build.SourceVersion) in azure-pipelines.yml. -->
   </PropertyGroup>
+
+  <ItemGroup>
+    <AssemblyMetadata Include="BuildTimeUtc" Value="$([System.DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'))" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.AspNetCore.Mvc.NewtonsoftJson" Version="8.0.11" />

@@ -18,13 +18,19 @@ namespace DeltaniumApi.Controllers
         private readonly KeyService _keyService;
         private readonly SignatureAuthHelper _auth;
         private readonly IConfiguration _config;
+        private readonly EconomicsService _econ;
+        private readonly IWalletService _wallet;
 
         public TransactionController(
             IStorageService storageService,
             KeyService keyService,
             SignatureAuthHelper auth,
-            IConfiguration config)
+            IConfiguration config,
+            EconomicsService econ,
+            IWalletService wallet)
         {
+            _econ = econ;
+            _wallet = wallet;
             _storageService = storageService;
             _keyService = keyService;
             _auth = auth;
@@ -71,28 +77,51 @@ namespace DeltaniumApi.Controllers
             if (tx.Timestamp <= 0)
                 tx.Timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
+            // TOKENOMICS_V2 §5/§10: tx fee (social actions sponsored and rate-limited, TopUp free).
+            var fee = await _econ.ChargeTxFeeAsync(tx.Type, tx.From, tx.Id);
+            if (!fee.Ok) return StatusCode(fee.Status, new { error = fee.Error, fee = fee.Fee });
+            tx.Fee = (long)Math.Ceiling(fee.Fee);
+
             await _storageService.AddTransactionAsync(tx);
-            return Ok(new { status = "queued", tx.Id, tx.Type });
+            return Ok(new { status = "queued", tx.Id, tx.Type, fee = fee.Fee, feePaidBy = fee.Payer });
         }
 
-        [HttpGet("pull")]
-        public async Task<ActionResult<List<BlockchainTransaction>>> Pull([FromQuery] int limit = 50)
+        /// <summary>
+        /// A Blocker takes pending transactions off the queue (they are marked delivered, so a caller can empty
+        /// the queue). Only an active registered Blocker may do it: the request is signed with the Blocker's node
+        /// key (X-User-PubKey, X-Timestamp, X-Signature, the SignatureAuthHelper format) and each signed request
+        /// is used once. The shared X-Internal-Token, which every node operator holds, no longer opens it.
+        /// </summary>
+        [HttpPost("pull")]
+        public async Task<ActionResult<List<BlockchainTransaction>>> Pull([FromQuery] int limit = 50, [FromQuery] string? blockerPubKey = null)
         {
-            var expected = _config["InternalApi:Token"];
-            if (string.IsNullOrWhiteSpace(expected))
-                return StatusCode(503, "InternalApi:Token not configured");
+            var body = await ReadBodyAsync();
+            var (ok, signer, err) = await _auth.ValidateAsync(Request, body, requireRegisteredUser: false);
+            if (!ok) return Unauthorized(err);
 
-            if (!Request.Headers.TryGetValue("X-Internal-Token", out var token) ||
-                !string.Equals(token.FirstOrDefault(), expected, StringComparison.Ordinal))
-            {
-                return Unauthorized("Invalid internal token");
-            }
+            var blocker = (await _storageService.GetActiveBlockCreatorNodesAsync())
+                .FirstOrDefault(b => SamePubKey(b.PublicKey, signer!));
+            if (blocker == null) return StatusCode(403, "Only an active registered Blocker can pull transactions");
+            if (!string.IsNullOrWhiteSpace(blockerPubKey) && !SamePubKey(blockerPubKey, signer!))
+                return StatusCode(403, "blockerPubKey does not match the signer");
 
             if (limit <= 0) limit = 50;
             if (limit > 500) limit = 500;
             var txs = await _storageService.PullPendingTransactionsAsync(limit);
             return Ok(txs);
         }
+
+        private async Task<string> ReadBodyAsync()
+        {
+            Request.EnableBuffering();
+            using var reader = new StreamReader(Request.Body, leaveOpen: true);
+            var body = await reader.ReadToEndAsync();
+            Request.Body.Position = 0;
+            return body;
+        }
+
+        private static bool SamePubKey(string a, string b) =>
+            string.Equals(SignatureAuthHelper.NormalizePubKey(a.Trim()), SignatureAuthHelper.NormalizePubKey(b.Trim()), StringComparison.OrdinalIgnoreCase);
 
         private static string NormalizeType(string input)
         {
@@ -111,7 +140,9 @@ namespace DeltaniumApi.Controllers
                 { "storageoperation", "StorageOperation" },
                 { "storage_operation", "StorageOperation" },
                 { "transfer", "Transfer" },
-                { "donate", "Donate" }
+                { "donate", "Donate" },
+                { "topup", "TopUp" },
+                { "top_up", "TopUp" }
             };
 
             var key = input.Trim();
@@ -121,7 +152,7 @@ namespace DeltaniumApi.Controllers
             var allowed = new HashSet<string>
             {
                 "UserRegistration", "Follow", "Unfollow", "CreatePost", "React", "Comment",
-                "NodeRegistration", "StorageOperation", "Transfer", "Donate"
+                "NodeRegistration", "StorageOperation", "Transfer", "Donate", "TopUp"
             };
             return allowed.Contains(input) ? input : "";
         }

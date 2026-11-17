@@ -23,6 +23,11 @@ Set-Secret "api.deltanium.com" "InternalApi__Token" $internalToken
 Set-Secret "api.deltanium.com" "INTERNAL_API_TOKEN" $internalToken
 # Optional: Set-Secret "api.deltanium.com" "CENTRAL_PRIVATE_KEY" "...."
 # Optional: Set-Secret "api.deltanium.com" "CENTRAL_PUBLIC_KEY" "...."
+# Super Admin: prefer Scripts/Set-SuperAdminPublicKey.ps1 (merges ProgramData, recycles pools)
+#   .\Set-SuperAdminPublicKey.ps1 -PublicKey "02...."
+# Optional legacy AppPool env:
+# Set-Secret "api.deltanium.com" "SUPER_ADMIN_PUBLIC_KEY" "...."
+# Set-Secret "blocker-1.deltanium.com" "SUPER_ADMIN_PUBLIC_KEY" "...."
 
 # --- Store 1 ---
 Set-Secret "store-1.deltanium.com" "ConnectionStrings__Default" "Server=127.0.0.1;Port=3306;Uid=REPLACE;Pwd=REPLACE;Database=deltanium_store_1;SslMode=Preferred;CharSet=utf8mb4;"

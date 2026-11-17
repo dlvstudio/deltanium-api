@@ -16,6 +16,8 @@ namespace DeltaniumApi.Controllers
         private readonly IStorageService _storageService;
         private readonly KeyService _keyService;
         private readonly SignatureAuthHelper _auth;
+        private readonly IWalletService _wallet;
+        private readonly EconomicsService _econ;
 
         public class NodeFilesResponse
         {
@@ -30,16 +32,28 @@ namespace DeltaniumApi.Controllers
             public List<string> StoreNodeIds { get; set; } = new();
             public string FileHash { get; set; } = "";
             public long FileSize { get; set; }
+            /// <summary>Storage term in months (default Economics:Storage:DefaultMonths).</summary>
+            public int Months { get; set; }
+            /// <summary>TimeFixed (default) | AutoRenew (OpenEnded store contracts map here).</summary>
+            public string? ContractType { get; set; }
+            /// <summary>SHA-256 of every uploaded block, used for proof-of-storage challenges.</summary>
+            public List<FileBlockHash>? Blocks { get; set; }
+            /// <summary>"social" for reactions, comments and chat messages (free, see EconomicsService.SocialItemMaxBytes).</summary>
+            public string? Kind { get; set; }
         }
 
         public StoredFileController(
             IStorageService storageService,
             KeyService keyService,
-            SignatureAuthHelper auth)
+            SignatureAuthHelper auth,
+            IWalletService wallet,
+            EconomicsService econ)
         {
+            _econ = econ;
             _storageService = storageService;
             _keyService = keyService;
             _auth = auth;
+            _wallet = wallet;
         }
 
         [HttpGet("nodes/{publicKey}")]
@@ -93,6 +107,8 @@ namespace DeltaniumApi.Controllers
             if (!nodes.Exists(n => n.Id == file.StoreNodeId))
                 return BadRequest("Invalid store node ID");
 
+            // v2: storage is paid through the escrow opened by register-replicas.
+
             await _storageService.SaveStoredFileAsync(file);
             return file;
         }
@@ -138,8 +154,103 @@ namespace DeltaniumApi.Controllers
                 StoredAt = DateTime.UtcNow
             }).ToList();
 
+            // v2 §6/§10: fund the storage escrow (free tier → network fund) before indexing placements.
+            await _wallet.EnsureReadyAsync();
+            var (paid, status, payErr, escrow, quote) = await _econ.OpenStorageEscrowAsync(
+                callerPk!, req.FileId, req.FileSize, validIds, req.Months, req.ContractType, req.Blocks,
+                social: string.Equals(req.Kind, "social", StringComparison.OrdinalIgnoreCase));
+            if (!paid) return StatusCode(status, new { error = payErr, quote });
+
             await _storageService.SaveStoredFilesBatchAsync(files);
-            return Ok(new { fileId = req.FileId, replicas = validIds.Count, storeNodeIds = validIds });
+            return Ok(new
+            {
+                fileId = req.FileId,
+                replicas = validIds.Count,
+                storeNodeIds = validIds,
+                storage = new
+                {
+                    escrow!.ContractType,
+                    escrow.Months,
+                    escrow.MonthlyFee,
+                    escrow.TotalFunded,
+                    escrow.FreeTier,
+                    escrow.Social,
+                    funded = escrow.TotalFunded > 0,
+                    proofBlocks = escrow.Blocks.Count
+                }
+            });
+        }
+
+        public class CancelEscrowRequest
+        {
+            public string FileId { get; set; } = "";
+        }
+
+        /// <summary>
+        /// The upload failed after register-replicas paid for it: close the escrow and refund the payer.
+        /// Owner-signed; refused once a Store holds the whole file or after the cancel window.
+        /// </summary>
+        [HttpPost("cancel-escrow")]
+        public async Task<ActionResult> CancelEscrow()
+        {
+            Request.EnableBuffering();
+            using var reader = new StreamReader(Request.Body);
+            var body = await reader.ReadToEndAsync();
+            Request.Body.Position = 0;
+
+            var (ok, callerPk, err) = await _auth.ValidateAsync(Request, body);
+            if (!ok) return Unauthorized(err);
+
+            var req = System.Text.Json.JsonSerializer.Deserialize<CancelEscrowRequest>(body,
+                new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            if (req == null || string.IsNullOrWhiteSpace(req.FileId)) return BadRequest("fileId required");
+
+            await _wallet.EnsureReadyAsync();
+            var (done, status, error, refunded) = await _econ.CancelFailedUploadAsync(callerPk!, req.FileId);
+            if (!done) return StatusCode(status, new { error });
+            await _storageService.DeactivateStoredFileAsync(req.FileId);
+            return Ok(new { fileId = req.FileId, cancelled = true, refunded });
+        }
+
+        /// <summary>Price a storage contract before upload (§6). Optional owner enables the free-tier check.</summary>
+        [HttpGet("quote")]
+        public async Task<ActionResult> Quote([FromQuery] long sizeBytes, [FromQuery] int replicas = 2,
+            [FromQuery] int months = 0, [FromQuery] string? owner = null)
+        {
+            if (sizeBytes <= 0) return BadRequest("sizeBytes required");
+            await _wallet.EnsureReadyAsync();
+            var quote = await _econ.QuoteAsync(owner, sizeBytes, replicas, months);
+            return Ok(new { quote, enforceFees = _wallet.EnforceFees });
+        }
+
+        /// <summary>Storage contract status for a file (Active | Grace | Expired | Lost | Closed).</summary>
+        [HttpGet("contract/{fileId}")]
+        public async Task<ActionResult> Contract(string fileId)
+        {
+            await _wallet.EnsureReadyAsync();
+            var e = await _econ.GetEscrowAsync(fileId);
+            if (e == null) return NotFound();
+            return Ok(new
+            {
+                e.Id,
+                e.OwnerPublicKey,
+                e.ContractType,
+                e.Status,
+                e.Months,
+                e.MonthsSettled,
+                e.MonthlyFee,
+                e.TotalFunded,
+                e.Released,
+                e.FreeTier,
+                e.StartAt,
+                e.GraceUntil,
+                e.StoreNodeIds,
+                e.FailedNodeIds,
+                e.Social,
+                proofBlocks = e.Blocks.Count,
+                e.EgressCapped,
+                escrowBalance = await _wallet.GetBalanceAsync(EconAccounts.Escrow(e.Id))
+            });
         }
 
         private static bool PubKeysMatch(string a, string b)

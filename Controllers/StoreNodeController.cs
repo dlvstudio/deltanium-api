@@ -28,8 +28,14 @@ namespace DeltaniumApi.Controllers
             public string Endpoint { get; set; }
         }
 
-        public StoreNodeController(KeyService keyService, IStorageService storageService)
+        private readonly EconomicsService _econ;
+        private readonly IWalletService _wallet;
+
+        public StoreNodeController(KeyService keyService, IStorageService storageService,
+            EconomicsService econ, IWalletService wallet)
         {
+            _econ = econ;
+            _wallet = wallet;
             _keyService = keyService;
             _storageService = storageService;
         }
@@ -81,7 +87,11 @@ namespace DeltaniumApi.Controllers
         [HttpGet("list")]
         public async Task<ActionResult<List<StoreNode>>> ListNodes()
         {
-            return await _storageService.GetActiveNodesAsync();
+            var nodes = await _storageService.GetActiveNodesAsync();
+            // v2 §8: when bonds are enforced, only nodes with the minimum bond are offered to clients.
+            if (!_econ.EnforceBonds) return nodes;
+            await _wallet.EnsureReadyAsync();
+            return await _econ.FilterStoreNodesByBondAsync(nodes);
         }
     }
 } 

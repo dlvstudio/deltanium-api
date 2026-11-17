@@ -28,8 +28,14 @@ namespace DeltaniumApi.Controllers
 
 		private record NonceRecord(string UserPubKey, string Nonce, DateTime Exp);
 
-		public PolicyController(IStorageService storageService, SignatureAuthHelper auth, IConfiguration config)
+		private readonly EconomicsService _econ;
+		private readonly IWalletService _wallet;
+
+		public PolicyController(IStorageService storageService, SignatureAuthHelper auth, IConfiguration config,
+			EconomicsService econ, IWalletService wallet)
 		{
+			_econ = econ;
+			_wallet = wallet;
 			_storageService = storageService;
 			_auth = auth;
 			_config = config;
@@ -234,10 +240,20 @@ namespace DeltaniumApi.Controllers
 				if (string.IsNullOrWhiteSpace(following) || string.IsNullOrWhiteSpace(tag) || string.IsNullOrWhiteSpace(requester))
 					return BadRequest("Missing required fields: followingPubKey, tag");
 
-				// Verify B follows A
-				var isFollowing = await _storageService.IsFollowingAsync(requester, following);
-				if (!isFollowing)
-					return Unauthorized("You must be following this user to access their content");
+				// v2 §9: "subscribers:YYYY-MM" tags require a paid subscription for that epoch instead of a follow.
+				if (EconomicsService.TryParseSubscriberTag(tag, out var subEpoch))
+				{
+					await _wallet.EnsureReadyAsync();
+					if (!await _econ.IsSubscribedAsync(requester, following, subEpoch))
+						return StatusCode(402, new { error = "Subscription required", following, tag });
+				}
+				else
+				{
+					// Verify B follows A
+					var isFollowing = await _storageService.IsFollowingAsync(requester, following);
+					if (!isFollowing)
+						return Unauthorized("You must be following this user to access their content");
+				}
 
 				// Minimal PoP check
 				if (proof.ValueKind == JsonValueKind.Object && System.IO.File.Exists(NoncePath))
@@ -298,6 +314,13 @@ namespace DeltaniumApi.Controllers
 				var exp = payload.TryGetProperty("exp", out var ex) ? ex.GetDateTime() : DateTime.MinValue;
 				if (exp < DateTime.UtcNow) return Unauthorized("token expired");
 				
+				if (EconomicsService.TryParseSubscriberTag(tag, out var subEpoch))
+				{
+					await _wallet.EnsureReadyAsync();
+					if (!await _econ.IsSubscribedAsync(follower!, following!, subEpoch))
+						return StatusCode(402, "Subscription required");
+				}
+
 				// Get rekey from storage
 				var rekey = await _storageService.GetRekeyAsync(follower, following, tag);
 				if (rekey == null) return NotFound("rk not found");

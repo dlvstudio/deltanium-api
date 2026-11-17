@@ -21,13 +21,6 @@ namespace DeltaniumApi.Controllers
         private readonly KeyService _keyService;
         private readonly IStorageService _storageService;
 
-        public class RegistrationResponse
-        {
-            public string Id { get; set; }
-            public string Mnemonic { get; set; }
-            public string PublicKey { get; set; }
-        }
-
         public class UserSearchResponse
         {
             public List<DiscoveredUser> Users { get; set; } = new List<DiscoveredUser>();
@@ -48,35 +41,49 @@ namespace DeltaniumApi.Controllers
             public long Timestamp { get; set; }
         }
 
-        public UserController(KeyService keyService, IStorageService storageService)
+        private int MaxRegistrationsPerIpPerDay =>
+            int.TryParse(_config?["Users:Registration:MaxPerIpPerDay"], out var n) ? n : 20;
+
+        private readonly Microsoft.Extensions.Configuration.IConfiguration? _config;
+
+        /// <summary>New accounts per client IP per UTC day (process memory; resets when the app restarts).</summary>
+        public static class RegistrationLimiter
+        {
+            private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string Day, int Count)> Counts = new();
+
+            public static bool TryAcquire(string ip, int max, DateTime? nowUtc = null)
+            {
+                if (max <= 0) return true;
+                var day = (nowUtc ?? DateTime.UtcNow).ToString("yyyy-MM-dd");
+                if (Counts.Count > 100_000) Counts.Clear(); // bounded memory
+                var allowed = false;
+                Counts.AddOrUpdate(ip,
+                    _ => { allowed = true; return (day, 1); },
+                    (_, cur) =>
+                    {
+                        if (cur.Day != day) { allowed = true; return (day, 1); }
+                        if (cur.Count >= max) { allowed = false; return cur; }
+                        allowed = true;
+                        return (day, cur.Count + 1);
+                    });
+                return allowed;
+            }
+        }
+
+        public UserController(KeyService keyService, IStorageService storageService, Microsoft.Extensions.Configuration.IConfiguration? config = null)
         {
             _keyService = keyService;
             _storageService = storageService;
-        }
-
-        [HttpGet("generateKeys")]
-        public ActionResult<RegistrationResponse> GenerateKeys()
-        {
-            var (mnemonic, publicKey) = _keyService.GenerateKeyPair();
-
-            return new RegistrationResponse
-            {
-                Id = System.Guid.NewGuid().ToString(),
-                Mnemonic = mnemonic,
-                PublicKey = publicKey
-            };
+            _config = config;
         }
 
         [HttpPost("register")]
         public async Task<ActionResult<User>> Register([FromBody] SignedRegisterRequest request)
         {
-            // Log các giá trị đầu vào
-            Console.WriteLine($"[REGISTER] publicKey: {request.PublicKey}");
-            Console.WriteLine($"[REGISTER] email: {request.Email}");
-            Console.WriteLine($"[REGISTER] fullName: {request.FullName}");
-            Console.WriteLine($"[REGISTER] dateOfBirth: {request.DateOfBirth}");
-            Console.WriteLine($"[REGISTER] timestamp: {request.Timestamp}");
-            Console.WriteLine($"[REGISTER] signature: {request.Signature}");
+            // Sybil brake: free-tier accounts are cheap to make, so cap new accounts per client IP per day.
+            var ip = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+            if (!RegistrationLimiter.TryAcquire(ip, MaxRegistrationsPerIpPerDay))
+                return StatusCode(429, "Too many new accounts from this network today; try again tomorrow");
 
             // Validate email format
             if (string.IsNullOrWhiteSpace(request.Email) || !request.Email.Contains("@"))
@@ -102,7 +109,7 @@ namespace DeltaniumApi.Controllers
 
             // Check if email is already registered
             var users = await _storageService.GetUsersAsync();
-            if (users.Any(u => u.Email == request.Email))
+            if (users.Any(u => string.Equals(u.Email?.Trim(), request.Email.Trim(), StringComparison.OrdinalIgnoreCase)))
             {
                 return BadRequest("Email already registered");
             }
@@ -115,11 +122,7 @@ namespace DeltaniumApi.Controllers
             // Verify signature with timestamp included
             var dobString = request.DateOfBirth?.ToString("yyyy-MM-dd") ?? "";
             var dataToVerify = $"{request.Email}:{request.FullName}:{dobString}:{request.Timestamp}";
-            Console.WriteLine($"[REGISTER] Server computed dataToVerify: '{dataToVerify}'");
-            Console.WriteLine($"[REGISTER] Server DoB string: '{dobString}' (from DateTime: {request.DateOfBirth})");
-            Console.WriteLine($"[REGISTER] Server signature (base64): '{request.Signature}'");
             var verifyResult = _keyService.VerifySignature(request.PublicKey, dataToVerify, request.Signature);
-            Console.WriteLine($"[REGISTER] verifyResult: {verifyResult}");
             if (!verifyResult)
             {
                 return BadRequest("Invalid signature");
@@ -165,8 +168,12 @@ namespace DeltaniumApi.Controllers
             return await _storageService.IsPublicKeyRegisteredAsync(publicKey);
         }
 
+        /// <summary>
+        /// Public profile. Email, date of birth and the registration signature are private: they are returned only
+        /// when the request is signed by the profile's owner (X-User-PubKey / X-Timestamp / X-Signature).
+        /// </summary>
         [HttpGet("profile/{publicKey}")]
-        public async Task<ActionResult<User>> GetProfile(string publicKey)
+        public async Task<ActionResult> GetProfile(string publicKey)
         {
             if (!_keyService.ValidatePublicKey(publicKey))
             {
@@ -174,15 +181,35 @@ namespace DeltaniumApi.Controllers
             }
 
             var users = await _storageService.GetUsersAsync();
-            var user = users.FirstOrDefault(u => u.PublicKey == publicKey);
+            var user = users.FirstOrDefault(u => u.PublicKey == publicKey)
+                ?? users.FirstOrDefault(u => u.PublicKey == NormalizePublicKey(publicKey));
             
             if (user == null)
             {
                 return NotFound("User not found");
             }
 
-            return user;
+            if (Request.Headers.TryGetValue("X-User-PubKey", out var caller)
+                && NormalizePublicKey(caller.ToString()) == NormalizePublicKey(user.PublicKey)
+                && await ValidateAuthentication())
+            {
+                return Ok(user);
+            }
+
+            return Ok(PublicProfile(user));
         }
+
+        /// <summary>The fields of a profile anyone may read.</summary>
+        public static object PublicProfile(User user) => new
+        {
+            id = user.Id,
+            publicKey = user.PublicKey,
+            fullName = user.FullName,
+            bio = user.Bio,
+            avatarUrl = user.AvatarUrl,
+            createdAt = user.CreatedAt,
+            updatedAt = user.UpdatedAt,
+        };
 
         [HttpPut("profile/{publicKey}")]
         public async Task<ActionResult<User>> UpdateProfile(string publicKey, [FromBody] SignedRegisterRequest request)
@@ -566,13 +593,12 @@ namespace DeltaniumApi.Controllers
             
             var usersWithSignatures = users
                 .Where(u => !string.IsNullOrEmpty(u.Signature)) // Only users with signatures
+                // No email or date of birth: this endpoint is public.
                 .Select(u => new 
                 {
                     Id = u.Id,
                     PublicKey = u.PublicKey,
-                    Email = u.Email,
                     FullName = u.FullName,
-                    DateOfBirth = u.DateOfBirth,
                     Signature = u.Signature,
                     RegistrationTimestamp = u.RegistrationTimestamp,
                     CreatedAt = u.CreatedAt
@@ -948,7 +974,7 @@ namespace DeltaniumApi.Controllers
 
                 var message = $"user_registration|{user.PublicKey}|{user.Email}|{user.FullName}|{user.RegistrationTimestamp ?? 0}";
                 using var sha256 = SHA256.Create();
-                var hash = sha256.ComputeHash(System.Text.Encoding.UTF8.GetBytes(message));
+                var hash = sha256.ComputeHash(System.Text.Encoding.UTF8.GetBytes(NetworkScope.Scope(message)));
                 var sig = centralKey.Sign(new uint256(hash)).ToDER();
                 return Convert.ToBase64String(sig);
             }
