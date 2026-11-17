@@ -28,5 +28,14 @@ namespace DeltaniumApi.Tests.Controllers
             Assert.Contains("Some One", json);
             Assert.Contains("04abc", json);
         }
+
+        [Fact]
+        public void Registration_message_for_block_creators_has_no_email()
+        {
+            var user = new User { PublicKey = "04abc", Email = "someone@example.com", FullName = "Some One", RegistrationTimestamp = 1 };
+            var msg = UserController.RegistrationMessage(user);
+            Assert.DoesNotContain("someone@example.com", msg);
+            Assert.Equal("user_registration|04abc|Some One|1", msg);
+        }
     }
 }

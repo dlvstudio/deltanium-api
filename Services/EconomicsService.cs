@@ -89,6 +89,12 @@ namespace DeltaniumApi.Services
         public string EgressReceiptMode => (_config["Economics:Bandwidth:ReceiptMode"] ?? "off").Trim().ToLowerInvariant();
         public int EgressReceiptMaxAgeDays => (int)Dec("Economics:Bandwidth:ReceiptMaxAgeDays", 30m);
         public bool AutoRepair => Bool("Economics:Storage:AutoRepair", true);
+        /// <summary>Most copies one upload may ask for (Economics:Storage:MaxReplicas, default 3).</summary>
+        public int MaxReplicas => int.TryParse(_config["Economics:Storage:MaxReplicas"], out var r) && r > 0 ? r : 3;
+
+        /// <summary>Fewer healthy copies than were paid for: a Store failed, or the uploader asked Central to replicate.</summary>
+        public static bool UnderReplicated(StorageEscrow e) =>
+            e.StoreNodeIds.Count(id => !e.FailedNodeIds.Contains(id)) < (e.TargetReplicas > 0 ? e.TargetReplicas : e.StoreNodeIds.Count);
 
         private decimal Dec(string key, decimal fallback) =>
             decimal.TryParse(_config[key], NumberStyles.Number, CultureInfo.InvariantCulture, out var v) ? v : fallback;
@@ -242,12 +248,17 @@ namespace DeltaniumApi.Services
         /// </summary>
         public async Task<(bool Ok, int Status, string Error, StorageEscrow? Escrow, StorageQuote? Quote)> OpenStorageEscrowAsync(
             string owner, string fileId, long sizeBytes, IReadOnlyList<string> storeNodeIds, int months,
-            string? contractType, IReadOnlyList<FileBlockHash>? blocks, bool social = false)
+            string? contractType, IReadOnlyList<FileBlockHash>? blocks, bool social = false, int replicas = 0)
         {
+            // Paid replica count: at least the Stores uploaded to, at most MaxReplicas and the Stores that exist.
+            // Missing copies are made by the repair job from a Store that holds the file.
+            var activeStores = (await _storage.GetActiveNodesAsync())?.Count ?? 0;
+            var target = Math.Max(storeNodeIds.Distinct().Count(), Math.Min(replicas, Math.Min(MaxReplicas, Math.Max(activeStores, 1))));
+            target = Math.Max(1, target);
             // §10: social items (reaction, comment, chat message) are free. They use the free quota while it lasts;
             // beyond it they are recorded unfunded instead of charging the owner. Only small items qualify.
             social = social && sizeBytes > 0 && sizeBytes <= SocialItemMaxBytes;
-            if (social && await GetSocialBytesThisMonthAsync(owner, DateTime.UtcNow) + sizeBytes * Math.Max(1, storeNodeIds.Count) > SocialMonthlyBytes)
+            if (social && await GetSocialBytesThisMonthAsync(owner, DateTime.UtcNow) + sizeBytes * target > SocialMonthlyBytes)
             {
                 _log?.LogInformation("Social budget used up for {Owner}; {FileId} billed as a normal upload", owner, fileId);
                 social = false;
@@ -269,7 +280,7 @@ namespace DeltaniumApi.Services
             var type = string.Equals(contractType, "AutoRenew", StringComparison.OrdinalIgnoreCase) ||
                        string.Equals(contractType, "OpenEnded", StringComparison.OrdinalIgnoreCase)
                 ? "AutoRenew" : "TimeFixed";
-            var quote = await QuoteAsync(owner, sizeBytes, storeNodeIds.Count, months);
+            var quote = await QuoteAsync(owner, sizeBytes, target, months);
             var escrow = new StorageEscrow
             {
                 Id = fileId,
@@ -283,7 +294,7 @@ namespace DeltaniumApi.Services
                 Blocks = blocks?.Where(b => !string.IsNullOrWhiteSpace(b.BlockId) && !string.IsNullOrWhiteSpace(b.Sha256))
                     .Select(b => new FileBlockHash { BlockId = b.BlockId, Sha256 = b.Sha256.ToLowerInvariant(), BlockIndex = b.BlockIndex }).ToList() ?? new()
             };
-            escrow.TargetReplicas = escrow.StoreNodeIds.Count;
+            escrow.TargetReplicas = target;
 
             if (_wallet.EnforceFees)
             {
@@ -505,7 +516,7 @@ namespace DeltaniumApi.Services
                         e.MonthsSettled++;
                         settledMonths++;
                     }
-                    if (AutoRepair && e.FailedNodeIds.Count > 0)
+                    if (AutoRepair && e.Blocks.Count > 0 && UnderReplicated(e))
                     {
                         try { await RepairEscrowAsync(e, nodes); }
                         catch (Exception ex) { _log?.LogWarning("Repair {FileId} failed: {Err}", e.Id, ex.Message); }
@@ -618,6 +629,89 @@ namespace DeltaniumApi.Services
             await _wallet.ApplyMovesAsync(new[] { new LedgerMove(EconAccounts.Escrow(e.Id), to, bal, "escrow:refund", reason) }, e.Id);
         }
 
+        // ---------------- one-off: Store data lost to the old deploy (2026-11) ----------------
+
+        /// <summary>Done-marker per cutoff, so the reconcile runs once.</summary>
+        private const string COps = "ops";
+
+        public class OpsMarker
+        {
+            public string Id { get; set; } = "";
+            public DateTime DoneAt { get; set; }
+            public string Summary { get; set; } = "";
+        }
+
+        /// <summary>
+        /// Until 2026-11-17 every Store deploy deleted the Store's blocks (MSDeploy sync wiped the site's FileStorage).
+        /// That was the operator's fault, not the Stores': for each escrow opened before <paramref name="startedBeforeUtc"/>,
+        /// a Store that answers "block not found" (HTTP 404) is dropped from the contract without slashing; when no Store
+        /// holds the file any more the escrow is marked Lost, its unused funds go back to the payer and the file is
+        /// deactivated. A Store that is unreachable or answers anything else is left alone. Runs once per cutoff.
+        /// </summary>
+        public async Task<(int Checked, int NodesDropped, int Lost)> ReconcileStoreDataLossAsync(DateTime startedBeforeUtc, bool force = false)
+        {
+            var markerId = $"reconcile-loss-{startedBeforeUtc:yyyyMMddTHHmmssZ}";
+            if (!force && await _docs.GetAsync<OpsMarker>(COps, markerId) != null) return (0, 0, 0);
+            if (_http == null) return (0, 0, 0);
+
+            var nodes = (await _storage.GetNodesAsync()).ToDictionary(n => n.Id);
+            var escrows = await _docs.ListAsync<StorageEscrow>(CEscrow, e =>
+                (e.Status == "Active" || e.Status == "Grace") && e.Blocks.Count > 0 && e.StartAt < startedBeforeUtc);
+            int dropped = 0, lost = 0;
+            foreach (var e in escrows)
+            {
+                var holders = 0;
+                var unknown = 0;
+                var lostOn = new List<string>();
+                foreach (var nodeId in e.StoreNodeIds.Where(id => !e.FailedNodeIds.Contains(id)))
+                {
+                    if (!nodes.TryGetValue(nodeId, out var node)) { unknown++; continue; }
+                    string state = "holds";
+                    foreach (var block in e.Blocks)
+                    {
+                        string? err;
+                        bool ok;
+                        try { (ok, err) = await ChallengeNodeAsync(node.Endpoint, block); }
+                        catch (Exception ex) { ok = false; err = ex.Message; }
+                        if (ok) continue;
+                        state = err == "HTTP 404" ? "lost" : "unknown";
+                        break;
+                    }
+                    if (state == "holds") holders++;
+                    else if (state == "lost") lostOn.Add(nodeId);
+                    else unknown++;
+                }
+                if (lostOn.Count == 0) continue;
+
+                foreach (var nodeId in lostOn)
+                {
+                    e.FailedNodeIds.Add(nodeId);     // settlement skips failed nodes: no pay, no slash
+                    e.VerifiedNodeIds.Remove(nodeId);
+                    dropped++;
+                }
+                if (holders == 0 && unknown == 0)
+                {
+                    e.Status = "Lost";
+                    await RefundRemainderAsync(e, "Blocks deleted by a Store redeploy (operator fault)");
+                    await _storage.DeactivateStoredFileAsync(e.Id);
+                    lost++;
+                }
+                else if (holders > 0 && AutoRepair)
+                {
+                    try { await RepairEscrowAsync(e, nodes); }
+                    catch (Exception ex) { _log?.LogWarning("Repair {FileId} after data loss failed: {Err}", e.Id, ex.Message); }
+                }
+                await _docs.PutAsync(CEscrow, e.Id, e);
+                _log?.LogWarning("Data-loss reconcile {FileId}: lost on {Lost}, holders {Holders}, status {Status}",
+                    e.Id, string.Join(",", lostOn), holders, e.Status);
+            }
+
+            var summary = $"checked {escrows.Count}, nodes dropped {dropped}, files lost {lost}";
+            await _docs.PutAsync(COps, markerId, new OpsMarker { Id = markerId, DoneAt = DateTime.UtcNow, Summary = summary });
+            _log?.LogWarning("Data-loss reconcile before {Cutoff:o}: {Summary}", startedBeforeUtc, summary);
+            return (escrows.Count, dropped, lost);
+        }
+
         // ---------------- automatic re-replication (§6) ----------------
 
         /// <summary>Replace failed replicas for every active escrow (worker job "repair").</summary>
@@ -625,7 +719,7 @@ namespace DeltaniumApi.Services
         {
             var nodes = (await _storage.GetNodesAsync()).ToDictionary(n => n.Id);
             var escrows = (await _docs.ListAsync<StorageEscrow>(CEscrow, e =>
-                    (e.Status == "Active" || e.Status == "Grace") && e.Blocks.Count > 0 && e.FailedNodeIds.Count > 0))
+                    (e.Status == "Active" || e.Status == "Grace") && e.Blocks.Count > 0 && UnderReplicated(e)))
                 .Take(maxFiles).ToList();
             var added = 0;
             foreach (var e in escrows)

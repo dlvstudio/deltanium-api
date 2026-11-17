@@ -237,6 +237,62 @@ namespace deltanium_api.Tests.Services
             (await _econ.CancelFailedUploadAsync(Alice, "missing")).Status.Should().Be(404);
         }
 
+        // ---------- data lost to the old Store deploy ----------
+
+        [Fact]
+        public async Task Data_loss_reconcile_marks_unrecoverable_files_lost_refunds_and_never_slashes()
+        {
+            await OpenEscrow("lost1", "sa", "sb");
+            await Fund(EconAccounts.Escrow("lost1"), 40m);
+            var e = (await _econ.GetEscrowAsync("lost1"))!;
+            e.VerifiedNodeIds.AddRange(new[] { "sa", "sb" }); // both had passed challenges before the deploy wiped them
+            await _econ.RecordProofAsync(e, "sa", true, null, DateTime.UtcNow);
+
+            var r = await _econ.ReconcileStoreDataLossAsync(DateTime.UtcNow.AddMinutes(1));
+
+            r.Lost.Should().Be(1);
+            r.NodesDropped.Should().Be(2);
+            var after = (await _econ.GetEscrowAsync("lost1"))!;
+            after.Status.Should().Be("Lost");
+            after.FailedNodeIds.Should().BeEquivalentTo(new[] { "sa", "sb" });
+            after.VerifiedNodeIds.Should().BeEmpty();
+            (await _wallet.GetBalanceAsync(Alice)).Should().Be(40m);
+            _storage.Verify(s => s.DeactivateStoredFileAsync("lost1"), Times.Once);
+            (await _econ.ListSlashesAsync()).Should().BeEmpty();
+
+            (await _econ.ReconcileStoreDataLossAsync(DateTime.UtcNow.AddMinutes(1))).Checked.Should().Be(0); // once per cutoff
+        }
+
+        [Fact]
+        public async Task Data_loss_reconcile_drops_only_the_store_that_lost_blocks_and_settlement_does_not_slash_it()
+        {
+            await OpenEscrow("half", "sa", "sb");
+            _stores.Seed("store-b", "b0", 0);
+            _stores.Seed("store-b", "b1", 1);
+            var e = (await _econ.GetEscrowAsync("half"))!;
+            e.VerifiedNodeIds.AddRange(new[] { "sa", "sb" });
+            await _econ.RecordProofAsync(e, "sa", true, null, DateTime.UtcNow);
+
+            var r = await _econ.ReconcileStoreDataLossAsync(DateTime.UtcNow.AddMinutes(1));
+
+            r.Lost.Should().Be(0);
+            var after = (await _econ.GetEscrowAsync("half"))!;
+            after.Status.Should().Be("Active");
+            after.FailedNodeIds.Should().Contain("sa").And.NotContain("sb");
+            after.VerifiedNodeIds.Should().NotContain("sa");
+            await _econ.SettleDueAsync(DateTime.UtcNow.AddMonths(1).AddDays(1));
+            (await _econ.ListSlashesAsync()).Should().BeEmpty();
+        }
+
+        [Fact]
+        public async Task Data_loss_reconcile_ignores_escrows_opened_after_the_cutoff()
+        {
+            await OpenEscrow("newer", "sa");
+            var r = await _econ.ReconcileStoreDataLossAsync(DateTime.UtcNow.AddHours(-1));
+            r.Checked.Should().Be(0);
+            (await _econ.GetEscrowAsync("newer"))!.FailedNodeIds.Should().BeEmpty();
+        }
+
         // ---------- re-replication ----------
 
         [Fact]
@@ -255,6 +311,37 @@ namespace deltanium_api.Tests.Services
             _stores.ImportedMetadata.Should().Be(1);
             _storage.Verify(s => s.SaveStoredFileAsync(It.Is<StoredFile>(f => f.FileId == "f2" && f.StoreNodeId == "sc")), Times.Once);
             (await _econ.ListReplicationEventsAsync("f2")).Should().ContainSingle(r => r.Ok && r.BlocksCopied == 2);
+        }
+
+        [Fact]
+        public async Task Upload_to_one_store_with_two_paid_replicas_is_copied_to_a_second_store()
+        {
+            var blocks = new List<FileBlockHash>
+            {
+                new() { BlockId = "b0", Sha256 = FakeStores.Hash("b0"), BlockIndex = 0 },
+                new() { BlockId = "b1", Sha256 = FakeStores.Hash("b1"), BlockIndex = 1 },
+            };
+            var (ok, _, err, e, quote) = await _econ.OpenStorageEscrowAsync(Alice, "r2", 1000, new List<string> { "sa" }, 12, "TimeFixed", blocks, replicas: 2);
+            ok.Should().BeTrue(err);
+            e!.TargetReplicas.Should().Be(2);
+            quote!.Replicas.Should().Be(2);
+            EconomicsService.UnderReplicated(e).Should().BeTrue();
+
+            _stores.Seed("store-a", "b0", 0);
+            _stores.Seed("store-a", "b1", 1);
+            (await _econ.RepairReplicasAsync()).Should().Be(1);
+
+            var after = (await _econ.GetEscrowAsync("r2"))!;
+            after.StoreNodeIds.Should().HaveCount(2).And.Contain("sa");
+            EconomicsService.UnderReplicated(after).Should().BeFalse();
+            (await _econ.RepairReplicasAsync()).Should().Be(0);
+        }
+
+        [Fact]
+        public async Task Requested_replicas_are_capped_by_max_and_by_existing_stores()
+        {
+            var (_, _, _, e, _) = await _econ.OpenStorageEscrowAsync(Alice, "r9", 1000, new List<string> { "sa" }, 12, "TimeFixed", null, replicas: 9);
+            e!.TargetReplicas.Should().Be(3); // 3 Stores exist, MaxReplicas defaults to 3
         }
 
         [Fact]

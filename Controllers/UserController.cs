@@ -924,7 +924,7 @@ namespace DeltaniumApi.Controllers
                 {
                     type = "user_registration",
                     publicKey = user.PublicKey,
-                    email = user.Email,
+                    // No email or date of birth: Block Creators may be run by anyone, and nothing on-chain needs them.
                     fullName = user.FullName,
                     timestamp = user.RegistrationTimestamp ?? 0,
                     signature = user.Signature,
@@ -961,6 +961,10 @@ namespace DeltaniumApi.Controllers
             }
         }
 
+        /// <summary>What Central signs for a registration broadcast to Block Creators. Holds no private data (no email).</summary>
+        public static string RegistrationMessage(User user) =>
+            $"user_registration|{user.PublicKey}|{user.FullName}|{user.RegistrationTimestamp ?? 0}";
+
         private string SignByCentral(User user)
         {
             try
@@ -972,7 +976,7 @@ namespace DeltaniumApi.Controllers
                     return string.Empty;
                 }
 
-                var message = $"user_registration|{user.PublicKey}|{user.Email}|{user.FullName}|{user.RegistrationTimestamp ?? 0}";
+                var message = RegistrationMessage(user);
                 using var sha256 = SHA256.Create();
                 var hash = sha256.ComputeHash(System.Text.Encoding.UTF8.GetBytes(NetworkScope.Scope(message)));
                 var sig = centralKey.Sign(new uint256(hash)).ToDER();

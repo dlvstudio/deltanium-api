@@ -40,6 +40,11 @@ namespace DeltaniumApi.Controllers
             public List<FileBlockHash>? Blocks { get; set; }
             /// <summary>"social" for reactions, comments and chat messages (free, see EconomicsService.SocialItemMaxBytes).</summary>
             public string? Kind { get; set; }
+            /// <summary>
+            /// Copies to keep (paid for). May exceed the Stores uploaded to: Central copies the file to more Stores
+            /// until this many hold it. 0 = the number of <c>StoreNodeIds</c>.
+            /// </summary>
+            public int Replicas { get; set; }
         }
 
         public StoredFileController(
@@ -158,7 +163,7 @@ namespace DeltaniumApi.Controllers
             await _wallet.EnsureReadyAsync();
             var (paid, status, payErr, escrow, quote) = await _econ.OpenStorageEscrowAsync(
                 callerPk!, req.FileId, req.FileSize, validIds, req.Months, req.ContractType, req.Blocks,
-                social: string.Equals(req.Kind, "social", StringComparison.OrdinalIgnoreCase));
+                social: string.Equals(req.Kind, "social", StringComparison.OrdinalIgnoreCase), replicas: req.Replicas);
             if (!paid) return StatusCode(status, new { error = payErr, quote });
 
             await _storageService.SaveStoredFilesBatchAsync(files);

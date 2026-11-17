@@ -44,6 +44,11 @@ namespace DeltaniumApi.Services
                 {
                     using var scope = _services.CreateScope();
                     var econ = scope.ServiceProvider.GetRequiredService<EconomicsService>();
+                    // One-off (Economics:ReconcileStoreLossBeforeUtc): settle escrows whose blocks the old deploy deleted
+                    // before challenges and settlement can blame the Stores. Runs once per cutoff.
+                    if (DateTime.TryParse(_config["Economics:ReconcileStoreLossBeforeUtc"], null,
+                            System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal, out var lossBefore))
+                        await econ.ReconcileStoreDataLossAsync(lossBefore);
                     if (DateTime.UtcNow - _lastChallenge >= challengeEvery)
                     {
                         var (c, p) = await econ.RunChallengesAsync();
