@@ -20,7 +20,7 @@ using Xunit;
 namespace deltanium_api.Tests.Services
 {
     /// <summary>Balance proofs (§11 B), reader egress receipts (§7) and automatic re-replication (§6).</summary>
-    public class EconomicsVerificationTests : IDisposable
+    public class EconomicsVerificationTests : IDisposable, IAsyncLifetime
     {
         private const string Alice = "alice-pk";
         private const string Bob = "bob-pk";
@@ -57,8 +57,10 @@ namespace deltanium_api.Tests.Services
             http.Setup(h => h.CreateClient(It.IsAny<string>())).Returns(() => new HttpClient(_stores, disposeHandler: false));
             _wallet = new WalletService(config);
             _econ = new EconomicsService(_wallet, new EconDocStore(config), _storage.Object, config, http.Object);
-            _wallet.EnsureReadyAsync().GetAwaiter().GetResult();
         }
+
+        public Task InitializeAsync() => _wallet.EnsureReadyAsync();
+        public Task DisposeAsync() => Task.CompletedTask;
 
         public void Dispose()
         {

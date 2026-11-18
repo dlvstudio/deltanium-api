@@ -50,6 +50,15 @@ namespace DeltaniumApi.Controllers
             public DecisionPayload Decision { get; set; } = new DecisionPayload();
             public string Signature { get; set; } = string.Empty;
             public string CentralPublicKey { get; set; } = string.Empty;
+            /// <summary>Central's signed statement of the API build that decided this tx; the Blocker stores it in the tx.</summary>
+            public VersionAttestation? Version { get; set; }
+        }
+
+        /// <summary>Message format shared with the Blocker (Core/VersionAttestation.cs).</summary>
+        public record VersionAttestation(string Service, string Version, string Commit, string PublicKey, string Signature)
+        {
+            public static string Message(string txId, string service, string version, string commit) =>
+                $"DELTANIUM-TX-VERSION\n{txId}\n{service}\n{version}\n{commit}";
         }
 
         private readonly EconomicsService _econ;
@@ -156,11 +165,14 @@ namespace DeltaniumApi.Controllers
             var toSign = $"DECISION|{payload.TxId}|{payload.BlockerPubKey}|{payload.Selected}|{payload.IssuedAt}|{payload.ExpiresAt}|{payload.Nonce}";
             var signature = _keyService.SignDecision(toSign);
 
+            var centralPublicKey = _keyService.GetCentralPublicKey();
             return new DecisionResponse
             {
                 Decision = payload,
                 Signature = signature,
-                CentralPublicKey = _keyService.GetCentralPublicKey()
+                CentralPublicKey = centralPublicKey,
+                Version = new VersionAttestation("api", BuildInfo.Version, BuildInfo.Commit, centralPublicKey,
+                    _keyService.SignDecision(VersionAttestation.Message(payload.TxId, "api", BuildInfo.Version, BuildInfo.Commit)))
             };
         }
 

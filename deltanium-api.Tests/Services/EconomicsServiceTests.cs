@@ -13,7 +13,7 @@ using Xunit;
 namespace deltanium_api.Tests.Services
 {
     /// <summary>TOKENOMICS_V2 economics on the JSON ledger (no MySQL, no network).</summary>
-    public class EconomicsServiceTests : IDisposable
+    public class EconomicsServiceTests : IDisposable, IAsyncLifetime
     {
         private const string Alice = "alice-pk";
         private const string Bob = "bob-pk";
@@ -46,10 +46,14 @@ namespace deltanium_api.Tests.Services
             {
                 new() { Id = "b1", PublicKey = Blocker, Endpoint = "http://blocker", LastSeen = DateTime.UtcNow }
             });
-            Build(enforceFees: true);
         }
 
-        private void Build(bool enforceFees, Dictionary<string, string?>? extra = null)
+        // No blocking on async work in the constructor: with the static wallet JSON gate that deadlocked xUnit's
+        // limited worker threads on 2-core CI agents.
+        public Task InitializeAsync() => Build(enforceFees: true);
+        public Task DisposeAsync() => Task.CompletedTask;
+
+        private Task Build(bool enforceFees, Dictionary<string, string?>? extra = null)
         {
             var settings = new Dictionary<string, string?>
             {
@@ -61,7 +65,7 @@ namespace deltanium_api.Tests.Services
             var config = new ConfigurationBuilder().AddInMemoryCollection(settings).Build();
             _wallet = new WalletService(config);
             _econ = new EconomicsService(_wallet, new EconDocStore(config), _storage.Object, config);
-            _wallet.EnsureReadyAsync().GetAwaiter().GetResult();
+            return _wallet.EnsureReadyAsync();
         }
 
         public void Dispose()
@@ -200,7 +204,7 @@ namespace deltanium_api.Tests.Services
         [Fact]
         public async Task Social_exemption_stops_at_the_monthly_budget()
         {
-            Build(enforceFees: true, new() { ["Economics:FreeTier:SocialMonthlyBytes"] = "1000" });
+            await Build(enforceFees: true, new() { ["Economics:FreeTier:SocialMonthlyBytes"] = "1000" });
             var first = await _econ.OpenStorageEscrowAsync(Bob, "s1", 600, new[] { "sa" }, 12, null, null, social: true);
             first.Ok.Should().BeTrue();
             first.Escrow!.Social.Should().BeTrue();
@@ -263,7 +267,7 @@ namespace deltanium_api.Tests.Services
         [Fact]
         public async Task Escrow_is_unfunded_while_fees_are_not_enforced()
         {
-            Build(enforceFees: false);
+            await Build(enforceFees: false);
             var r = await _econ.OpenStorageEscrowAsync(Alice, "f-off", 300L * 1024 * 1024, new[] { "sa" }, 12, null, Blocks());
             r.Ok.Should().BeTrue();
             r.Escrow!.TotalFunded.Should().Be(0);
@@ -371,7 +375,7 @@ namespace deltanium_api.Tests.Services
         [Fact]
         public async Task Enforced_bonds_exclude_unbonded_blockers()
         {
-            Build(enforceFees: true, new() { ["Economics:Bond:Enforce"] = "true" });
+            await Build(enforceFees: true, new() { ["Economics:Bond:Enforce"] = "true" });
             var nodes = new List<BlockCreatorNode> { new() { PublicKey = Blocker, LastSeen = DateTime.UtcNow } };
             (await _econ.PickBlockerAsync(nodes)).Should().BeNull();
             await Fund(Blocker, 500_000m);
@@ -473,7 +477,7 @@ namespace deltanium_api.Tests.Services
         [Fact]
         public async Task Social_actions_are_rate_limited()
         {
-            Build(enforceFees: false, new() { ["Economics:FreeTier:SocialTxPerHour"] = "2" });
+            await Build(enforceFees: false, new() { ["Economics:FreeTier:SocialTxPerHour"] = "2" });
             var who = "rate-" + Guid.NewGuid().ToString("N");
             (await _econ.ChargeTxFeeAsync("React", who, "1")).Ok.Should().BeTrue();
             (await _econ.ChargeTxFeeAsync("React", who, "2")).Ok.Should().BeTrue();

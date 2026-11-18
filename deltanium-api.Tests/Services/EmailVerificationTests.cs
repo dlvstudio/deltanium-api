@@ -37,7 +37,7 @@ namespace deltanium_api.Tests.Services
             try { Directory.Delete(_dir, true); } catch { }
         }
 
-        private (EconomicsService Econ, EmailVerificationService Verify, WalletService Wallet) Build(Dictionary<string, string?>? extra = null)
+        private async Task<(EconomicsService Econ, EmailVerificationService Verify, WalletService Wallet)> Build(Dictionary<string, string?>? extra = null)
         {
             var settings = new Dictionary<string, string?>
             {
@@ -48,7 +48,7 @@ namespace deltanium_api.Tests.Services
             if (extra != null) foreach (var kv in extra) settings[kv.Key] = kv.Value;
             var config = new ConfigurationBuilder().AddInMemoryCollection(settings).Build();
             var wallet = new WalletService(config);
-            wallet.EnsureReadyAsync().GetAwaiter().GetResult();
+            await wallet.EnsureReadyAsync();
             var econ = new EconomicsService(wallet, new EconDocStore(config), _storage.Object, config);
             return (econ, new EmailVerificationService(new EconDocStore(config), _sender.Object), wallet);
         }
@@ -56,7 +56,7 @@ namespace deltanium_api.Tests.Services
         [Fact]
         public async Task Code_verifies_the_address_and_is_never_stored_in_clear()
         {
-            var (econ, verify, _) = Build(new() { ["Economics:FreeTier:RequireVerifiedEmail"] = "true" });
+            var (econ, verify, _) = await Build(new() { ["Economics:FreeTier:RequireVerifiedEmail"] = "true" });
             (await econ.IsFreeTierEligibleAsync(Alice)).Should().BeFalse();
 
             string? code = null;
@@ -74,7 +74,7 @@ namespace deltanium_api.Tests.Services
         [Fact]
         public async Task Wrong_codes_lock_out_and_codes_expire()
         {
-            var (_, verify, _) = Build();
+            var (_, verify, _) = await Build();
             string? code = null;
             var t0 = DateTime.UtcNow;
             await verify.SendCodeAsync(Alice, "a@example.test", t0, c => { code = c; return Task.CompletedTask; });
@@ -89,7 +89,7 @@ namespace deltanium_api.Tests.Services
         [Fact]
         public async Task One_verified_address_unlocks_one_account_and_sends_are_rate_limited()
         {
-            var (_, verify, _) = Build();
+            var (_, verify, _) = await Build();
             string? code = null;
             await verify.SendCodeAsync(Alice, "a@example.test", null, c => { code = c; return Task.CompletedTask; });
             (await verify.VerifyAsync(Alice, code!)).Ok.Should().BeTrue();
@@ -102,7 +102,7 @@ namespace deltanium_api.Tests.Services
         [Fact]
         public async Task Sending_needs_smtp_configured()
         {
-            var (_, verify, _) = Build();
+            var (_, verify, _) = await Build();
             _sender.SetupGet(s => s.IsConfigured).Returns(false);
             (await verify.SendCodeAsync(Alice, "a@example.test")).Status.Should().Be(503);
         }
@@ -110,7 +110,7 @@ namespace deltanium_api.Tests.Services
         [Fact]
         public async Task Without_verification_each_address_counts_once()
         {
-            var (econ, _, _) = Build();
+            var (econ, _, _) = await Build();
             (await econ.IsFreeTierEligibleAsync(Alice)).Should().BeTrue();
             (await econ.IsFreeTierEligibleAsync(Mallory)).Should().BeFalse(); // same address, registered later
             (await econ.IsFreeTierEligibleAsync(Carol)).Should().BeTrue();
@@ -119,7 +119,7 @@ namespace deltanium_api.Tests.Services
         [Fact]
         public async Task Unfunded_free_tier_stops_at_the_network_budget_but_social_items_still_pass()
         {
-            var (econ, _, wallet) = Build(new() { ["Economics:FreeTier:UnfundedBudgetBytes"] = "3000" });
+            var (econ, _, wallet) = await Build(new() { ["Economics:FreeTier:UnfundedBudgetBytes"] = "3000" });
             (await econ.OpenStorageEscrowAsync(Alice, "p1", 2000, new[] { "sa" }, 12, null, null)).Ok.Should().BeTrue();
             var over = await econ.OpenStorageEscrowAsync(Carol, "p2", 2000, new[] { "sa" }, 12, null, null);
             over.Ok.Should().BeFalse();
