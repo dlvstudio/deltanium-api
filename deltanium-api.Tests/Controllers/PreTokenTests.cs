@@ -44,15 +44,15 @@ namespace deltanium_api.Tests.Controllers
             PreTokenSigner.Verify(payload + "." + forgedSig, _keys).Should().BeNull("not Central's key");
         }
 
-        private PolicyController Controller(string body, Key signer)
+        private PolicyController Controller(string body, Key signer, string path = "/api/policy/validate-token", string? claimedPubKey = null)
         {
             var ts = DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString();
-            var msg = SignatureAuthHelper.BuildSignedMessage("POST", "/api/policy/validate-token", ts, body);
+            var msg = SignatureAuthHelper.BuildSignedMessage("POST", path, ts, body);
             var sig = Convert.ToBase64String(signer.Sign(new uint256(SHA256.HashData(Encoding.UTF8.GetBytes(NetworkScope.Scope(msg))))).ToDER());
             var ctx = new DefaultHttpContext();
             ctx.Request.Method = "POST";
-            ctx.Request.Path = "/api/policy/validate-token";
-            ctx.Request.Headers["X-User-PubKey"] = signer.PubKey.ToHex();
+            ctx.Request.Path = path;
+            ctx.Request.Headers["X-User-PubKey"] = claimedPubKey ?? signer.PubKey.ToHex();
             ctx.Request.Headers["X-Timestamp"] = ts;
             ctx.Request.Headers["X-Signature"] = sig;
             ctx.Request.Body = new MemoryStream(Encoding.UTF8.GetBytes(body));
@@ -110,6 +110,47 @@ namespace deltanium_api.Tests.Controllers
             var r = await Controller(body, _store).ValidateToken();
             Status(r).Should().Be(200);
             JsonSerializer.Serialize(((ObjectResult)r).Value).Should().Contain("cms=");
+        }
+    
+        private readonly Key _follower = new();
+        private readonly Key _author = new();
+
+        private string FetchBody() => JsonSerializer.Serialize(new { followingPubKey = _author.PubKey.ToHex(), tag = "followers", mode = "client" });
+
+        private void FollowerMayFetch()
+        {
+            var f = _follower.PubKey.ToHex();
+            _storage.Setup(s => s.IsPublicKeyRegisteredAsync(f)).ReturnsAsync(true);
+            _storage.Setup(s => s.IsFollowingAsync(f, _author.PubKey.ToHex())).ReturnsAsync(true);
+            _storage.Setup(s => s.GetRekeyAsync(f, _author.PubKey.ToHex(), "followers"))
+                .ReturnsAsync(new UserRekey { FollowerPubKey = f, FollowingPubKey = _author.PubKey.ToHex(), Tag = "followers", RkBase64 = "rk", IsActive = true });
+        }
+
+        [Fact]
+        public async Task Follower_signed_fetch_rekey_returns_the_rekey()
+        {
+            FollowerMayFetch();
+            var r = await Controller(FetchBody(), _follower, "/api/policy/fetch-rekey").FetchRekey();
+            Status(r).Should().Be(200);
+        }
+
+        [Fact]
+        public async Task Fetch_rekey_refuses_someone_else_claiming_the_followers_key()
+        {
+            FollowerMayFetch();
+            var attacker = new Key();
+            var r = await Controller(FetchBody(), attacker, "/api/policy/fetch-rekey", claimedPubKey: _follower.PubKey.ToHex()).FetchRekey();
+            Status(r).Should().Be(401);
+            _storage.Verify(s => s.GetRekeyAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>()), Times.Never);
+        }
+
+        [Fact]
+        public async Task Fetch_rekey_refuses_a_header_without_signature()
+        {
+            FollowerMayFetch();
+            var c = Controller(FetchBody(), _follower, "/api/policy/fetch-rekey");
+            c.ControllerContext.HttpContext.Request.Headers.Remove("X-Signature");
+            Status(await c.FetchRekey()).Should().Be(401);
         }
     }
 }

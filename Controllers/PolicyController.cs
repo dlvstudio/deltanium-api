@@ -222,7 +222,6 @@ namespace DeltaniumApi.Controllers
 		{
 			try
 			{
-				var requester = Request.Headers["X-User-PubKey"].ToString(); // Follower B
 				Request.EnableBuffering();
 				Request.Body.Position = 0;
 				using var reader = new StreamReader(Request.Body);
@@ -231,6 +230,10 @@ namespace DeltaniumApi.Controllers
 
 				if (string.IsNullOrWhiteSpace(rawBody))
 					return BadRequest("Empty request body");
+
+				// Follower B must prove it holds the key it asks for: X-User-PubKey alone is not trusted.
+				var (authOk, requester, authErr) = await _auth.ValidateAsync(Request, rawBody);
+				if (!authOk) return Unauthorized(authErr);
 
 				using var doc = JsonDocument.Parse(rawBody);
 				var root = doc.RootElement;
