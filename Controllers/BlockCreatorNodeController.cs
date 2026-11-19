@@ -5,6 +5,9 @@ using DeltaniumApi.Services;
 using Microsoft.AspNetCore.Mvc;
 using System.Linq;
 using System;
+using System.IO;
+using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Configuration;
 
 namespace DeltaniumApi.Controllers
 {
@@ -63,14 +66,76 @@ namespace DeltaniumApi.Controllers
 
         private readonly EconomicsService _econ;
         private readonly IWalletService _wallet;
+        private readonly IConfiguration? _config;
 
         public BlockCreatorNodeController(KeyService keyService, IStorageService storageService,
-            EconomicsService econ, IWalletService wallet)
+            EconomicsService econ, IWalletService wallet, IConfiguration? config = null)
         {
             _keyService = keyService;
             _storageService = storageService;
             _econ = econ;
             _wallet = wallet;
+            _config = config;
+        }
+
+        public class DeactivateRequest
+        {
+            public string PublicKey { get; set; } = "";
+            public string? Reason { get; set; }
+        }
+
+        /// <summary>
+        /// Admin: take a Block Creator out of selection and tx submission (key rotation, compromised key,
+        /// retired node). The record is kept, marked inactive, so its old blocks still verify. Same admin
+        /// auth as the wallet admin endpoints: X-SuperAdmin-Request-Signature + X-Timestamp, or X-Admin-Token.
+        /// </summary>
+        [HttpPost("admin/deactivate")]
+        public async Task<IActionResult> AdminDeactivate()
+        {
+            Request.EnableBuffering();
+            string body;
+            using (var reader = new StreamReader(Request.Body, leaveOpen: true)) body = await reader.ReadToEndAsync();
+            Request.Body.Position = 0;
+            if (AdminDenied(body) is { } denied) return denied;
+
+            var req = System.Text.Json.JsonSerializer.Deserialize<DeactivateRequest>(body,
+                new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            if (req == null || string.IsNullOrWhiteSpace(req.PublicKey)) return BadRequest("publicKey required");
+
+            var node = await _storageService.GetBlockCreatorNodeByPublicKeyAsync(req.PublicKey.Trim());
+            if (node == null) return NotFound("Block Creator not found");
+            if (!node.IsActive) return Ok(new { node.Id, node.PublicKey, node.Endpoint, isActive = false, note = "already inactive" });
+
+            node.IsActive = false;
+            await _storageService.UpdateBlockCreatorNodeAsync(node);
+            Console.WriteLine($"[ADMIN] Block Creator {node.PublicKey} ({node.Endpoint}) deactivated: {req.Reason}");
+            return Ok(new { node.Id, node.PublicKey, node.Endpoint, isActive = false });
+        }
+
+        private IActionResult? AdminDenied(string body)
+        {
+            if (Request.Headers.TryGetValue("X-SuperAdmin-Request-Signature", out var saSig) &&
+                Request.Headers.TryGetValue("X-Timestamp", out var tsHeader) &&
+                long.TryParse(tsHeader.FirstOrDefault(), out var ts))
+            {
+                if ((DateTimeOffset.UtcNow - DateTimeOffset.FromUnixTimeSeconds(ts)).Duration() > SignatureAuthHelper.MaxClockSkew)
+                    return Unauthorized("Admin timestamp expired");
+                var message = SignatureAuthHelper.BuildSignedMessage(Request.Method, $"{Request.Path}{Request.QueryString}", tsHeader.First()!, body);
+                var superPk = _keyService.GetSuperAdminPublicKey();
+                if (!_keyService.VerifySignature(superPk, message, saSig.FirstOrDefault() ?? ""))
+                    return Unauthorized("Invalid Super Admin request signature");
+                if (!SignatureAuthHelper.TryConsumeSignature("superadmin:" + superPk, message))
+                    return Unauthorized("Request already used (replayed signature)");
+                return null;
+            }
+
+            var adminToken = _config?["InternalApi:AdminToken"] is { Length: > 0 } t ? t : Environment.GetEnvironmentVariable("ADMIN_API_TOKEN");
+            if (!string.IsNullOrWhiteSpace(adminToken) && Request.Headers.TryGetValue("X-Admin-Token", out var gotAdmin) &&
+                System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
+                    System.Text.Encoding.UTF8.GetBytes(gotAdmin.FirstOrDefault() ?? ""), System.Text.Encoding.UTF8.GetBytes(adminToken)))
+                return null;
+
+            return Unauthorized("Admin authorization required (X-SuperAdmin-Request-Signature or X-Admin-Token)");
         }
 
         /// <summary>
