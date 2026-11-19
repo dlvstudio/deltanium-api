@@ -150,13 +150,26 @@ namespace DeltaniumApi.Services
             return Convert.ToBase64String(sig.ToDER());
         }
 
+        private static readonly object CentralKeyLock = new();
+        private static (string publicKey, string privateKey)? _centralKeyPair;
+
+        /// <summary>
+        /// Loaded (or, without env/file, generated) once per process under a lock. Re-reading on every call let
+        /// two concurrent first calls each generate and write a different key, so a signature made with one
+        /// failed to verify against the public key read back a moment later.
+        /// </summary>
         private (string publicKey, string privateKey) GetOrCreateCentralKeyPair()
         {
-            return LoadOrCreateKeyPair(
-                "CENTRAL_PUBLIC_KEY",
-                "CENTRAL_PRIVATE_KEY",
-                CentralKeyFile,
-                "central");
+            if (_centralKeyPair is { } cached) return cached;
+            lock (CentralKeyLock)
+            {
+                _centralKeyPair ??= LoadOrCreateKeyPair(
+                    "CENTRAL_PUBLIC_KEY",
+                    "CENTRAL_PRIVATE_KEY",
+                    CentralKeyFile,
+                    "central");
+                return _centralKeyPair.Value;
+            }
         }
 
         /// <summary>
