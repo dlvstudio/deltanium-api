@@ -192,6 +192,8 @@
           const canApprove = o.status === "pending" && o.signPayload;
           return `<tr>
             <td><code>${o.id}</code></td>
+            <td><strong>${o.transferContent || ""}</strong></td>
+            <td>${o.channel === "paypal" ? "PayPal" : (o.channel === "transfer" ? "VietQR" : (o.channel || ""))}</td>
             <td><code class="pk" title="${o.buyerPublicKey}">${shortPk(o.buyerPublicKey)}</code></td>
             <td>${Number(o.fiatAmountVnd).toLocaleString()} VND</td>
             <td>${o.dCredited} D</td>
@@ -204,7 +206,7 @@
         }).join("");
         $("tableWrap").innerHTML = `<table>
           <thead><tr>
-            <th>Order</th><th>Buyer</th><th>Fiat</th><th>Credit</th><th>Status</th><th>Created</th><th></th>
+            <th>Order</th><th>Content (DLT)</th><th>Channel</th><th>Buyer</th><th>Fiat</th><th>Credit</th><th>Status</th><th>Created</th><th></th>
           </tr></thead>
           <tbody>${rows}</tbody>
         </table>`;

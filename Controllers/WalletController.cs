@@ -455,19 +455,108 @@ namespace DeltaniumApi.Controllers
             if (req == null || req.FiatAmountVnd <= 0)
                 return BadRequest("fiatAmountVnd required");
 
+            var channel = (req.Channel ?? "transfer").Trim().ToLowerInvariant();
+            if (channel == "paypal" && PayPalMinVnd() is { } minVnd && req.FiatAmountVnd < minVnd)
+                return BadRequest($"PayPal minimum is {PayPalMinUsd():0} USD ({minVnd:#,0} VND) / Nạp qua PayPal tối thiểu {PayPalMinUsd():0} USD ({minVnd:#,0} VND)");
+            if (channel == "card" && !string.Equals(_config["Economics:TopUp:CardEnabled"], "true", StringComparison.OrdinalIgnoreCase))
+                return BadRequest("Card top-up is not available yet; use bank transfer");
+
             await _wallet.EnsureReadyAsync();
-            var (created, createErr, order) = await _wallet.CreateTopUpOrderAsync(pk!, req.FiatAmountVnd, req.Channel ?? "transfer");
+            var (created, createErr, order) = await _wallet.CreateTopUpOrderAsync(pk!, req.FiatAmountVnd, channel);
             if (!created || order == null) return BadRequest(createErr);
 
+            var bank = TopUpBank();
+            var transferContent = TransferContent(order);
+            if (channel == "paypal")
+            {
+                var pp = PayPalPayment(order);
+                if (pp == null) return BadRequest("PayPal top-up is not configured");
+                return Ok(new
+                {
+                    order,
+                    paypal = pp,
+                    transferContent,
+                    instructions = $"Gửi {pp.AmountUsd:0.00} USD qua {pp.Url} và ghi {transferContent} trong phần ghi chú. " +
+                                   "D được cộng sau khi khoản thanh toán được duyệt."
+                });
+            }
             return Ok(new
             {
                 order,
-                instructions =
-                    "Transfer the fiat amount to the Deltanium operating account, then contact support with order.id. " +
-                    "Ops completes via /admin/topup.html (Internal token + Super Admin signs the TopUp SignPayload). " +
-                    "Central submits a TopUp network tx; D is credited from treasury only after a blocker accepts it."
+                bank,
+                transferContent,
+                instructions = bank == null
+                    ? "Transfer the fiat amount to the Deltanium operating account, then contact support with order.id."
+                    : $"Chuyển {order.FiatAmountVnd:0} VND tới {bank.BankName} {bank.AccountNo} ({bank.AccountName}) với nội dung {transferContent}. " +
+                      "D được cộng vào ví sau khi tiền về và được duyệt."
             });
         }
+
+        /// <summary>The signed-in user's own top-up orders, newest first.</summary>
+        [HttpGet("topups")]
+        public async Task<IActionResult> MyTopUps()
+        {
+            var a = await AuthAsync(requireRegisteredUser: false);
+            if (!a.Ok) return a.Fail!;
+            await _wallet.EnsureReadyAsync();
+            var mine = (await _wallet.ListTopUpOrdersAsync("all", 1000))
+                .Where(o => o.BuyerPublicKey == a.Pk)
+                .Take(20)
+                .Select(o => new
+                {
+                    o.Id, o.FiatAmountVnd, o.FeePercent, o.DCredited, o.Channel, o.Status, o.CreatedAt, o.CompletedAt,
+                    transferContent = TransferContent(o)
+                });
+            return Ok(new { bank = TopUpBank(), orders = mine });
+        }
+
+        /// <summary>
+        /// Smallest PayPal top-up (Economics:TopUp:PayPal:MinUsd, default 20): PayPal's fixed per-transaction fee
+        /// makes small international payments cost more than the channel fee.
+        /// </summary>
+        private decimal PayPalMinUsd() =>
+            decimal.TryParse(_config["Economics:TopUp:PayPal:MinUsd"], System.Globalization.NumberStyles.Number,
+                System.Globalization.CultureInfo.InvariantCulture, out var m) && m >= 0 ? m : 20m;
+
+        private decimal? PayPalMinVnd()
+        {
+            if (!decimal.TryParse(_config["Economics:TopUp:PayPal:VndPerUsd"], System.Globalization.NumberStyles.Number,
+                    System.Globalization.CultureInfo.InvariantCulture, out var rate) || rate <= 0) return null;
+            return PayPalMinUsd() * rate;
+        }
+
+        public record PayPalPaymentInfo(string Link, string Url, decimal AmountUsd, decimal VndPerUsd);
+
+        /// <summary>
+        /// PayPal.me payment for an order (Economics:TopUp:PayPal: Link, VndPerUsd). The USD amount is the
+        /// order's VND amount at that rate, rounded up to the cent; ops approves after matching the note.
+        /// </summary>
+        private PayPalPaymentInfo? PayPalPayment(TopUpOrder o)
+        {
+            var s = _config.GetSection("Economics:TopUp:PayPal");
+            var link = (s["Link"] ?? "").Trim().TrimEnd('/');
+            if (link.Length == 0 || !decimal.TryParse(s["VndPerUsd"], System.Globalization.NumberStyles.Number,
+                    System.Globalization.CultureInfo.InvariantCulture, out var rate) || rate <= 0)
+                return null;
+            var usd = Math.Ceiling(o.FiatAmountVnd / rate * 100m) / 100m;
+            var url = $"{link}/{usd.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture)}USD";
+            return new PayPalPaymentInfo(link, url, usd, rate);
+        }
+
+        public record TopUpBankInfo(string Bin, string BankName, string AccountNo, string AccountName);
+
+        /// <summary>Receiving account for bank-transfer top-ups (Economics:TopUp:Bank); null when not configured.</summary>
+        private TopUpBankInfo? TopUpBank()
+        {
+            var s = _config.GetSection("Economics:TopUp:Bank");
+            var acct = s["AccountNo"];
+            if (string.IsNullOrWhiteSpace(acct)) return null;
+            return new TopUpBankInfo(s["Bin"] ?? "", s["BankName"] ?? "", acct, s["AccountName"] ?? "");
+        }
+
+        /// <summary>Short reference the buyer puts in the transfer content, so ops can match the bank statement.</summary>
+        public static string TransferContent(TopUpOrder o) =>
+            "DLT" + (o.Id.Length >= 10 ? o.Id[..10] : o.Id).ToUpperInvariant();
 
         /// <summary>
         /// Ops: complete top-up after fiat is received.
@@ -513,6 +602,8 @@ namespace DeltaniumApi.Controllers
                     o.PlatformFiatVnd,
                     o.NetworkReserveFiatVnd,
                     o.Status,
+                    transferContent = TransferContent(o),
+                    o.Channel,
                     o.NetworkTxId,
                     o.CreatedAt,
                     o.CompletedAt,

@@ -52,12 +52,13 @@ namespace DeltaniumApi.Services
         /// <summary>v2: 100% of supply on ledger at genesis.</summary>
         private decimal TreasuryGenesisShare => Dec("Economics:TreasuryGenesisShare", 1.0m);
 
-        public static readonly string[] Channels = { "transfer", "card", "iap" };
+        public static readonly string[] Channels = { "transfer", "card", "iap", "paypal" };
 
         public decimal OnRampFeePercent(string channel) => channel switch
         {
             "card" => Dec("Economics:OnRampFee:Card", 5m),
             "iap" => Dec("Economics:OnRampFee:Iap", 0m),
+            "paypal" => Dec("Economics:OnRampFee:PayPal", 6m),
             _ => Dec("Economics:OnRampFee:Transfer", 3m),
         };
 
@@ -345,7 +346,7 @@ CREATE TABLE IF NOT EXISTS topup_orders (
         {
             buyerPublicKey = Norm(buyerPublicKey);
             channel = (channel ?? "transfer").Trim().ToLowerInvariant();
-            if (!Channels.Contains(channel)) return (false, $"Unknown channel '{channel}' (transfer | card | iap)", null);
+            if (!Channels.Contains(channel)) return (false, $"Unknown channel '{channel}' (transfer | card | iap | paypal)", null);
             if (fiatAmountVnd < MinTopUpVnd) return (false, $"Minimum top-up is {MinTopUpVnd} VND", null);
 
             var fee = OnRampFeePercent(channel);

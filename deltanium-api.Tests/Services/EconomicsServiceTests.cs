@@ -90,6 +90,7 @@ namespace deltanium_api.Tests.Services
         [Theory]
         [InlineData("transfer", 97_000)]
         [InlineData("card", 95_000)]
+        [InlineData("paypal", 94_000)]
         public async Task TopUp_fee_depends_on_channel_and_backs_reserve_1_to_1(string channel, decimal expectedD)
         {
             var (ok, _, order) = await _wallet.CreateTopUpOrderAsync(Alice, 100_000m, channel);
