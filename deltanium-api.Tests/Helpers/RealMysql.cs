@@ -7,31 +7,16 @@ namespace deltanium_api.Tests.Helpers
 {
     public static class RealMysql
     {
+        /// <summary>
+        /// Only an explicit local database: DELTANIUM_MYSQL_CS pointing at localhost. Never the user-secrets
+        /// connection string, which points at the production server (these tests write and delete rows).
+        /// </summary>
         public static string? TryGetConnectionString(string databaseHint = "deltanium_api")
         {
-            var env = Environment.GetEnvironmentVariable("DELTANIUM_MYSQL_CS");
-            if (!string.IsNullOrWhiteSpace(env))
-                return env;
-
-            var secretsId = databaseHint switch
-            {
-                "deltanium_blocker" => "deltanium-blocker-local-secrets",
-                "deltanium_store" => "deltanium-store-local-secrets",
-                _ => "deltanium-api-local-secrets"
-            };
-
-            var path = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                ".microsoft", "usersecrets", secretsId, "secrets.json");
-
-            if (!File.Exists(path))
-                return null;
-
-            using var doc = JsonDocument.Parse(File.ReadAllText(path));
-            if (doc.RootElement.TryGetProperty("ConnectionStrings:Default", out var cs))
-                return cs.GetString();
-
-            return null;
+            var cs = Environment.GetEnvironmentVariable("DELTANIUM_MYSQL_CS");
+            if (string.IsNullOrWhiteSpace(cs)) return null;
+            var host = new MySqlConnector.MySqlConnectionStringBuilder(cs).Server.Trim();
+            return host is "localhost" or "127.0.0.1" or "::1" ? cs : null;
         }
 
         public static ApiDbContext? CreateApiContextOrNull()
