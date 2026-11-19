@@ -95,6 +95,9 @@ var connectionString = builder.Configuration.GetConnectionString("Default");
 
 builder.Services.AddSingleton<KeyService>();
 builder.Services.AddScoped<SignatureAuthHelper>();
+// Requests to TCP-only nodes go over DLTP; everything else over HTTP(S) as before.
+builder.Services.AddTransient<DeltaniumApi.Services.Dltp.DltpRoutingHandler>();
+builder.Services.ConfigureHttpClientDefaults(b => b.AddHttpMessageHandler<DeltaniumApi.Services.Dltp.DltpRoutingHandler>());
 builder.Services.AddHttpClient("blocker-tx", c => c.Timeout = TimeSpan.FromSeconds(15));
 builder.Services.AddHttpClient("explorer", c => c.Timeout = TimeSpan.FromSeconds(20));
 builder.Services.AddScoped<IBlockerTxSubmitter, BlockerTxSubmitter>();
@@ -197,6 +200,15 @@ if (string.Equals(storageProvider, "MySql", StringComparison.OrdinalIgnoreCase))
     using var scope = app.Services.CreateScope();
     var db = scope.ServiceProvider.GetRequiredService<ApiDbContext>();
     db.Database.EnsureCreated();
+    // Upgrades of tables created by earlier versions (ignore "already applied" errors).
+    foreach (var sql in new[]
+    {
+        "ALTER TABLE store_nodes ADD COLUMN TcpEndpoint VARCHAR(255) NULL;",
+        "ALTER TABLE block_creator_nodes ADD COLUMN TcpEndpoint VARCHAR(255) NULL;",
+    })
+    {
+        try { db.Database.ExecuteSqlRaw(sql); } catch { /* already applied */ }
+    }
 
     var wallet = scope.ServiceProvider.GetRequiredService<IWalletService>();
     await wallet.EnsureReadyAsync();

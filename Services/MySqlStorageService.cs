@@ -104,6 +104,16 @@ namespace DeltaniumApi.Services
             return true;
         }
 
+        public async Task<bool> UpdateNodeEndpointsAsync(string nodeId, string endpoint, string? tcpEndpoint)
+        {
+            var node = await _db.StoreNodes.FirstOrDefaultAsync(n => n.Id == nodeId);
+            if (node == null) return false;
+            node.Endpoint = endpoint;
+            node.TcpEndpoint = tcpEndpoint;
+            await _db.SaveChangesAsync();
+            return true;
+        }
+
         public async Task SaveStoredFileAsync(StoredFile file)
         {
             _db.StoredFiles.Add(file);
@@ -356,6 +366,7 @@ namespace DeltaniumApi.Services
             if (existing == null) return;
 
             existing.Endpoint = updatedNode.Endpoint;
+            existing.TcpEndpoint = updatedNode.TcpEndpoint;
             existing.IsActive = updatedNode.IsActive;
             existing.LastSeen = updatedNode.LastSeen;
             existing.StakeAmount = updatedNode.StakeAmount;

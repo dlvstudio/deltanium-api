@@ -147,6 +147,12 @@ namespace DeltaniumApi.Controllers
             var validIds = req.StoreNodeIds.Distinct().Where(id => nodes.Exists(n => n.Id == id)).ToList();
             if (validIds.Count == 0)
                 return BadRequest("No valid store node IDs");
+            // Web readers can only reach Stores over HTTPS: keep at least one replica on such a Store
+            // whenever the network has one (TCP-only Stores are fine for the other replicas).
+            static bool HasHttps(StoreNode n) => !string.IsNullOrWhiteSpace(n.Endpoint);
+            if (nodes.Exists(n => n.IsActive && HasHttps(n)) &&
+                !validIds.Any(id => nodes.Exists(n => n.Id == id && HasHttps(n))))
+                return BadRequest("At least one replica must be on a Store with an HTTPS endpoint");
 
             var files = validIds.Select(id => new StoredFile
             {

@@ -6,6 +6,7 @@ using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using DeltaniumApi.Services.Dltp;
 
 namespace DeltaniumApi.Services
 {
@@ -50,8 +51,8 @@ namespace DeltaniumApi.Services
                 var blockers = await _storage.GetActiveBlockCreatorNodesAsync();
                 var stores = await _storage.GetActiveNodesAsync();
 
-                var blockerTasks = blockers.Select(b => ProbeAsync("blocker", b.PublicKey, b.Endpoint, b.LastSeen, true));
-                var storeTasks = stores.Select(s => ProbeAsync("store", s.PublicKey, s.Endpoint, s.LastSeen, false));
+                var blockerTasks = blockers.Select(b => ProbeAsync("blocker", b.PublicKey, b.Endpoint, b.TcpEndpoint, b.LastSeen, true));
+                var storeTasks = stores.Select(s => ProbeAsync("store", s.PublicKey, s.Endpoint, s.TcpEndpoint, s.LastSeen, false));
 
                 var report = new NodeHealthReport
                 {
@@ -69,14 +70,16 @@ namespace DeltaniumApi.Services
             }
         }
 
-        private async Task<NodeHealth> ProbeAsync(string role, string? publicKey, string? endpoint, DateTime lastSeen, bool chain)
+        private async Task<NodeHealth> ProbeAsync(string role, string? publicKey, string? endpoint, string? tcpEndpoint, DateTime lastSeen, bool chain)
         {
-            var baseUrl = (endpoint ?? "").Trim().TrimEnd('/');
+            // HTTPS when the node has it, otherwise its DLTP endpoint (routed by DltpRoutingHandler).
+            var baseUrl = NodeAddress.Of(endpoint, tcpEndpoint);
             var n = new NodeHealth
             {
                 Role = role,
                 PublicKey = publicKey ?? "",
-                Endpoint = baseUrl,
+                Endpoint = (endpoint ?? "").Trim().TrimEnd('/'),
+                TcpEndpoint = string.IsNullOrWhiteSpace(tcpEndpoint) ? null : tcpEndpoint.Trim(),
                 LastSeen = DateTime.SpecifyKind(lastSeen, DateTimeKind.Utc),
             };
             if (!Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri) || (uri.Scheme != "https" && uri.Scheme != "http"))
@@ -137,6 +140,7 @@ namespace DeltaniumApi.Services
         public string Role { get; set; } = "";
         public string PublicKey { get; set; } = "";
         public string Endpoint { get; set; } = "";
+        public string? TcpEndpoint { get; set; }
         public DateTime LastSeen { get; set; }
         public bool Online { get; set; }
         public int? LatencyMs { get; set; }

@@ -159,6 +159,17 @@ namespace DeltaniumApi.Services
             return true;
         }
 
+        public async Task<bool> UpdateNodeEndpointsAsync(string nodeId, string endpoint, string? tcpEndpoint)
+        {
+            var nodes = await GetNodesAsync();
+            var node = nodes.FirstOrDefault(n => n.Id == nodeId);
+            if (node == null) return false;
+            node.Endpoint = endpoint;
+            node.TcpEndpoint = tcpEndpoint;
+            await File.WriteAllTextAsync(_nodesFilePath, JsonConvert.SerializeObject(nodes, Formatting.Indented));
+            return true;
+        }
+
         public async Task SaveStoredFileAsync(StoredFile file)
         {
             var files = await GetStoredFilesAsync();

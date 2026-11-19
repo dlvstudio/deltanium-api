@@ -11,6 +11,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using NBitcoin;
+using DeltaniumApi.Services.Dltp;
 
 namespace DeltaniumApi.Controllers
 {
@@ -867,13 +868,13 @@ namespace DeltaniumApi.Controllers
                     centralSignature
                 };
 
-                using var http = new System.Net.Http.HttpClient();
+                using var http = new System.Net.Http.HttpClient(new DltpRoutingHandler(new System.Net.Http.HttpClientHandler()));
 
                 foreach (var node in blockers)
                 {
                     try
                     {
-                        var endpoint = node.Endpoint?.TrimEnd('/') ?? "";
+                        var endpoint = NodeAddress.Of(node.Endpoint, node.TcpEndpoint);
                         if (string.IsNullOrEmpty(endpoint))
                             continue;
 

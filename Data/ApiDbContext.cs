@@ -54,6 +54,7 @@ namespace DeltaniumApi.Data
                 e.HasIndex(x => x.PublicKey).IsUnique();
                 e.Property(x => x.PublicKey).HasMaxLength(130).IsRequired();
                 e.Property(x => x.Endpoint).HasMaxLength(512);
+                e.Property(x => x.TcpEndpoint).HasMaxLength(255);
             });
 
             modelBuilder.Entity<BlockCreatorNode>(e =>
@@ -63,6 +64,7 @@ namespace DeltaniumApi.Data
                 e.HasIndex(x => x.PublicKey).IsUnique();
                 e.Property(x => x.PublicKey).HasMaxLength(130).IsRequired();
                 e.Property(x => x.Endpoint).HasMaxLength(512);
+                e.Property(x => x.TcpEndpoint).HasMaxLength(255);
             });
 
             modelBuilder.Entity<StoredFile>(e =>

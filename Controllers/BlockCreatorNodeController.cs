@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using DeltaniumApi.Models;
 using DeltaniumApi.Services;
+using DeltaniumApi.Services.Dltp;
 using Microsoft.AspNetCore.Mvc;
 using System.Linq;
 using System;
@@ -20,7 +21,10 @@ namespace DeltaniumApi.Controllers
 
         public class NodeRegistrationRequest
         {
-            public string Endpoint { get; set; }
+            /// <summary>HTTPS endpoint (optional when TcpEndpoint is given).</summary>
+            public string? Endpoint { get; set; }
+            /// <summary>DLTP endpoint tcps://host:port (optional when Endpoint is given).</summary>
+            public string? TcpEndpoint { get; set; }
             public string Voucher { get; set; }
             public string PublicKey { get; set; }
         }
@@ -30,6 +34,7 @@ namespace DeltaniumApi.Controllers
             public string Id { get; set; }
             public string PublicKey { get; set; }
             public string Endpoint { get; set; }
+            public string? TcpEndpoint { get; set; }
         }
 
         public class DecisionRequest
@@ -112,6 +117,29 @@ namespace DeltaniumApi.Controllers
             return Ok(new { node.Id, node.PublicKey, node.Endpoint, isActive = false });
         }
 
+        /// <summary>Admin sets a Block Creator's HTTPS and/or DLTP endpoint.</summary>
+        [HttpPost("admin/endpoints")]
+        public async Task<IActionResult> AdminSetEndpoints()
+        {
+            Request.EnableBuffering();
+            string body;
+            using (var reader = new StreamReader(Request.Body, leaveOpen: true)) body = await reader.ReadToEndAsync();
+            Request.Body.Position = 0;
+            if (AdminDenied(body) is { } denied) return denied;
+
+            var req = System.Text.Json.JsonSerializer.Deserialize<StoreNodeController.NodeEndpointsRequest>(body,
+                new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            if (req == null || string.IsNullOrWhiteSpace(req.PublicKey)) return BadRequest("publicKey required");
+            var node = await _storageService.GetBlockCreatorNodeByPublicKeyAsync(req.PublicKey.Trim());
+            if (node == null) return NotFound("Block Creator not found");
+            var r = StoreNodeController.ApplyEndpoints(node.Endpoint, node.TcpEndpoint, req);
+            if (!r.Ok) return BadRequest(r.Error);
+            node.Endpoint = r.Https;
+            node.TcpEndpoint = r.Tcp;
+            await _storageService.UpdateBlockCreatorNodeAsync(node);
+            return Ok(new { node.Id, node.PublicKey, endpoint = r.Https, tcpEndpoint = r.Tcp });
+        }
+
         private IActionResult? AdminDenied(string body)
         {
             if (Request.Headers.TryGetValue("X-SuperAdmin-Request-Signature", out var saSig) &&
@@ -153,10 +181,15 @@ namespace DeltaniumApi.Controllers
         [HttpPost("register")]
         public async Task<ActionResult<NodeRegistrationResponse>> Register([FromBody] NodeRegistrationRequest request)
         {
-            if (string.IsNullOrWhiteSpace(request.Endpoint))
-            {
-                return BadRequest("Endpoint is required");
-            }
+            // A node is reachable over HTTPS, over DLTP (TCP), or both — at least one.
+            var httpsEndpoint = (request.Endpoint ?? "").Trim().TrimEnd('/');
+            var tcpEndpoint = string.IsNullOrWhiteSpace(request.TcpEndpoint) ? null : request.TcpEndpoint.Trim().TrimEnd('/');
+            if (httpsEndpoint.Length == 0 && tcpEndpoint == null)
+                return BadRequest("Endpoint (https) or TcpEndpoint (tcps://host:port) is required");
+            if (httpsEndpoint.Length > 0 && !NodeAddress.IsAcceptableHttps(httpsEndpoint))
+                return BadRequest("Endpoint must be an https:// URL");
+            if (tcpEndpoint != null && !NodeAddress.IsAcceptableTcp(tcpEndpoint))
+                return BadRequest("TcpEndpoint must look like tcps://host:port");
             if (string.IsNullOrWhiteSpace(request.Voucher))
             {
                 return BadRequest("Voucher is required");
@@ -187,7 +220,8 @@ namespace DeltaniumApi.Controllers
             var node = new BlockCreatorNode
             {
                 PublicKey = request.PublicKey,
-                Endpoint = request.Endpoint
+                Endpoint = httpsEndpoint,
+                TcpEndpoint = tcpEndpoint
             };
 
             await _storageService.SaveBlockCreatorNodeAsync(node);
@@ -196,7 +230,8 @@ namespace DeltaniumApi.Controllers
             {
                 Id = node.Id,
                 PublicKey = node.PublicKey,
-                Endpoint = node.Endpoint
+                Endpoint = node.Endpoint,
+                TcpEndpoint = node.TcpEndpoint
             };
         }
 

@@ -11,6 +11,7 @@ using System.Threading.Tasks;
 using DeltaniumApi.Models;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using DeltaniumApi.Services.Dltp;
 
 namespace DeltaniumApi.Services
 {
@@ -126,9 +127,9 @@ namespace DeltaniumApi.Services
         public async Task<(string Kind, string PublicKey, string Id, string Endpoint)?> FindNodeAsync(string publicKey)
         {
             foreach (var n in await _storage.GetNodesAsync())
-                if (SameKey(n.PublicKey, publicKey)) return ("store", n.PublicKey, n.Id, n.Endpoint);
+                if (SameKey(n.PublicKey, publicKey)) return ("store", n.PublicKey, n.Id, NodeAddress.Of(n.Endpoint, n.TcpEndpoint));
             foreach (var b in await _storage.GetBlockCreatorNodesAsync())
-                if (SameKey(b.PublicKey, publicKey)) return ("blocker", b.PublicKey, b.Id, b.Endpoint);
+                if (SameKey(b.PublicKey, publicKey)) return ("blocker", b.PublicKey, b.Id, NodeAddress.Of(b.Endpoint, b.TcpEndpoint));
             return null;
         }
 
@@ -396,7 +397,7 @@ namespace DeltaniumApi.Services
                 foreach (var block in e.Blocks)
                 {
                     bool ok;
-                    try { (ok, _) = await ChallengeNodeAsync(node.Endpoint, block); }
+                    try { (ok, _) = await ChallengeNodeAsync(NodeAddress.Of(node.Endpoint, node.TcpEndpoint), block); }
                     catch { ok = false; }
                     if (!ok) { complete = false; break; }
                 }
@@ -433,7 +434,7 @@ namespace DeltaniumApi.Services
                     if (!nodes.TryGetValue(nodeId, out var node)) error = "node not in registry";
                     else
                     {
-                        try { (ok, error) = await ChallengeNodeAsync(node.Endpoint, block); }
+                        try { (ok, error) = await ChallengeNodeAsync(NodeAddress.Of(node.Endpoint, node.TcpEndpoint), block); }
                         catch (Exception ex) { error = ex.Message; }
                     }
                     await RecordProofAsync(e, nodeId, ok, error, now);
@@ -667,7 +668,7 @@ namespace DeltaniumApi.Services
                     {
                         string? err;
                         bool ok;
-                        try { (ok, err) = await ChallengeNodeAsync(node.Endpoint, block); }
+                        try { (ok, err) = await ChallengeNodeAsync(NodeAddress.Of(node.Endpoint, node.TcpEndpoint), block); }
                         catch (Exception ex) { ok = false; err = ex.Message; }
                         if (ok) continue;
                         state = err == "HTTP 404" ? "lost" : "unknown";
@@ -740,7 +741,7 @@ namespace DeltaniumApi.Services
             if (need <= 0 || healthy.Count == 0) return 0;
 
             var candidates = nodes.Values
-                .Where(n => n.IsActive && !e.StoreNodeIds.Contains(n.Id) && !string.IsNullOrWhiteSpace(n.Endpoint))
+                .Where(n => n.IsActive && !e.StoreNodeIds.Contains(n.Id) && NodeAddress.Of(n.Endpoint, n.TcpEndpoint).Length > 0)
                 .OrderBy(_ => Random.Shared.Next()).ToList();
             if (EnforceBonds) candidates = await FilterStoreNodesByBondAsync(candidates);
 
@@ -795,20 +796,20 @@ namespace DeltaniumApi.Services
             var ev = new ReplicationEvent { FileId = e.Id, SourceNodeId = src.Id, TargetNodeId = dst.Id };
             try
             {
-                using (var meta = await PostInternalAsync(src.Endpoint, "/api/proof/export-metadata", new { fileId = e.Id }))
+                using (var meta = await PostInternalAsync(NodeAddress.Of(src.Endpoint, src.TcpEndpoint), "/api/proof/export-metadata", new { fileId = e.Id }))
                 {
                     var items = meta?.RootElement.TryGetProperty("items", out var it) == true ? it.Clone() : default;
                     if (items.ValueKind != JsonValueKind.Array || items.GetArrayLength() == 0)
                         throw new InvalidOperationException("source has no metadata for file");
-                    using var _ = await PostInternalAsync(dst.Endpoint, "/api/proof/import-metadata", new { items });
+                    using var _ = await PostInternalAsync(NodeAddress.Of(dst.Endpoint, dst.TcpEndpoint), "/api/proof/import-metadata", new { items });
                     ev.MetadataCopied = items.GetArrayLength();
                 }
                 foreach (var b in e.Blocks)
                 {
-                    var (ok, err, data, index) = await FetchBlockAsync(src.Endpoint, b);
+                    var (ok, err, data, index) = await FetchBlockAsync(NodeAddress.Of(src.Endpoint, src.TcpEndpoint), b);
                     if (!ok || data == null) throw new InvalidOperationException($"block {b.BlockId}: {err}");
                     if (index < 0) throw new InvalidOperationException($"block {b.BlockId}: unknown block index");
-                    using var _ = await PostInternalAsync(dst.Endpoint, "/api/proof/import-block", new
+                    using var _ = await PostInternalAsync(NodeAddress.Of(dst.Endpoint, dst.TcpEndpoint), "/api/proof/import-block", new
                     {
                         fileId = e.Id, blockId = b.BlockId, blockIndex = index,
                         dataBase64 = Convert.ToBase64String(data), sha256 = b.Sha256
@@ -817,7 +818,7 @@ namespace DeltaniumApi.Services
                     ev.BlocksCopied++;
                 }
                 var probe = e.Blocks[Random.Shared.Next(e.Blocks.Count)];
-                var (verified, verr) = await ChallengeNodeAsync(dst.Endpoint, probe);
+                var (verified, verr) = await ChallengeNodeAsync(NodeAddress.Of(dst.Endpoint, dst.TcpEndpoint), probe);
                 if (!verified) throw new InvalidOperationException($"new replica failed verification: {verr}");
                 ev.Ok = true;
             }
@@ -847,7 +848,7 @@ namespace DeltaniumApi.Services
                 try
                 {
                     using var client = _http.CreateClient("econ");
-                    using var req = new HttpRequestMessage(HttpMethod.Post, $"{node.Endpoint.TrimEnd('/')}/api/proof/egress/drain");
+                    using var req = new HttpRequestMessage(HttpMethod.Post, $"{NodeAddress.Of(node.Endpoint, node.TcpEndpoint)}/api/proof/egress/drain");
                     AuthorizeStoreCall(req, "");
                     using var resp = await client.SendAsync(req);
                     if (!resp.IsSuccessStatusCode) continue;

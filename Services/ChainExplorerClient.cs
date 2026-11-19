@@ -5,6 +5,7 @@ using System.Net.Http;
 using System.Text.Json;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using DeltaniumApi.Services.Dltp;
 
 namespace DeltaniumApi.Services
 {
@@ -189,7 +190,7 @@ namespace DeltaniumApi.Services
         {
             var nodes = await _storage.GetActiveBlockCreatorNodesAsync();
             return nodes
-                .Select(n => n.Endpoint?.Trim().TrimEnd('/'))
+                .Select(n => NodeAddress.Of(n.Endpoint, n.TcpEndpoint))
                 .Where(e => !string.IsNullOrWhiteSpace(e))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .Cast<string>()

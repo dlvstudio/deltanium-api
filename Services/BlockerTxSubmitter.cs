@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using DeltaniumApi.Services.Dltp;
 
 namespace DeltaniumApi.Services
 {
@@ -47,7 +48,7 @@ namespace DeltaniumApi.Services
 
             foreach (var node in blockers)
             {
-                var endpoint = node.Endpoint?.TrimEnd('/') ?? "";
+                var endpoint = NodeAddress.Of(node.Endpoint, node.TcpEndpoint);
                 if (string.IsNullOrEmpty(endpoint)) continue;
                 try
                 {
