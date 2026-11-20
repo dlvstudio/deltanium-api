@@ -148,7 +148,10 @@ namespace DeltaniumApi.Controllers
             var centralPubKey = GetCentralPublicKeyOrEmpty();
 
             // 🆕 Broadcast registration transaction to Block Creator nodes
-            _ = SendRegistrationToBlockCreatorsAsync(user, centralSignature, centralPubKey);
+            // Read the Block Creators now, inside the request: the broadcast below runs after the response, when this
+            // request's DbContext may already be gone (using it there corrupted pooled MySQL connections).
+            var blockers = await _storageService.GetActiveBlockCreatorNodesAsync();
+            _ = SendRegistrationToBlockCreatorsAsync(user, centralSignature, centralPubKey, blockers);
 
             return Ok(new
             {
@@ -845,11 +848,11 @@ namespace DeltaniumApi.Controllers
         /// Send user registration transaction to all active Block Creator nodes
         /// Fire-and-forget; failures are logged to console without blocking the request
         /// </summary>
-        private async Task SendRegistrationToBlockCreatorsAsync(User user, string centralSignature, string centralPubKey)
+        /// <summary>Fire-and-forget: HTTP only, no database access (see the caller).</summary>
+        private async Task SendRegistrationToBlockCreatorsAsync(User user, string centralSignature, string centralPubKey, List<BlockCreatorNode>? blockers)
         {
             try
             {
-                var blockers = await _storageService.GetActiveBlockCreatorNodesAsync();
                 if (blockers == null || blockers.Count == 0)
                 {
                     Console.WriteLine("[BLOCKER_TX] No active Block Creator nodes found.");
