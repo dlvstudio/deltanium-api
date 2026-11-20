@@ -21,6 +21,13 @@ namespace DeltaniumApi.Services.Dltp
         private static readonly Regex TcpRe = new(@"^(tcps?)://([A-Za-z0-9.\-]+|\[[0-9a-fA-F:.]+\]):(\d{1,5})/?$", RegexOptions.Compiled);
         private static readonly ConcurrentDictionary<string, DltpTarget> TcpOnly = new(StringComparer.OrdinalIgnoreCase);
 
+        /// <summary>
+        /// Local addresses (localhost, plain http/tcp) are only for a Central running in Development: a node must
+        /// never be able to make a production Central call services on its own machine.
+        /// </summary>
+        public static bool AllowLocal { get; set; } =
+            string.Equals(Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT"), "Development", StringComparison.OrdinalIgnoreCase);
+
         /// <summary>Host placeholder a node may register ("tcps://auto:7333"): Central fills in the IP it sees the node call from.</summary>
         public const string AutoHost = "auto";
 
@@ -53,15 +60,19 @@ namespace DeltaniumApi.Services.Dltp
         public static bool IsAcceptableTcp(string? value)
         {
             if (!TryParseTcp(value, out var tls, out var host, out _)) return false;
-            if (!tls) return host is "localhost" or "127.0.0.1" or "[::1]";
+            if (!tls) return AllowLocal && host is "localhost" or "127.0.0.1" or "[::1]";
             if (host == AutoHost || host == "localhost") return false;
             if (IsIpLiteral(host, out var ip)) return IsPublicIp(ip);
             return host.Contains('.');
         }
 
-        public static bool IsAcceptableHttps(string? value) =>
-            Uri.TryCreate((value ?? "").Trim(), UriKind.Absolute, out var u) &&
-            (u.Scheme == Uri.UriSchemeHttps || (u.Scheme == Uri.UriSchemeHttp && u.IsLoopback));
+        public static bool IsAcceptableHttps(string? value)
+        {
+            if (!Uri.TryCreate((value ?? "").Trim(), UriKind.Absolute, out var u)) return false;
+            var local = u.IsLoopback || (IsIpLiteral(u.Host, out var ip) && !IsPublicIp(ip));
+            if (local) return AllowLocal && (u.Scheme == Uri.UriSchemeHttps || u.Scheme == Uri.UriSchemeHttp);
+            return u.Scheme == Uri.UriSchemeHttps;
+        }
 
         /// <summary>"tcps://auto:7333" becomes "tcps://&lt;the node's public IP&gt;:7333"; other values are returned as they are.</summary>
         public static string? ResolveAuto(string? tcpEndpoint, IPAddress? remote)

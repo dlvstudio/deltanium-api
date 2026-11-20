@@ -195,6 +195,67 @@ namespace DeltaniumApi.Controllers
             return ApplyEndpoints(currentHttps, currentTcp, new NodeEndpointsRequest { TcpEndpoint = tcp });
         }
 
+        /// <summary>Super Admin turns a Store node off (e.g. a test node, or one that left the network).</summary>
+        [HttpPost("admin/deactivate")]
+        public async Task<IActionResult> Deactivate()
+        {
+            Request.EnableBuffering();
+            string raw;
+            using (var reader = new System.IO.StreamReader(Request.Body, leaveOpen: true)) raw = await reader.ReadToEndAsync();
+            Request.Body.Position = 0;
+            if (_auth == null) return StatusCode(500, "auth unavailable");
+            var (ok, err) = _auth.ValidateSuperAdminRequest(Request, raw);
+            if (!ok) return Unauthorized(err);
+
+            string? publicKey, reason;
+            try
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(raw);
+                publicKey = doc.RootElement.TryGetProperty("publicKey", out var p) ? p.GetString() : null;
+                reason = doc.RootElement.TryGetProperty("reason", out var r) ? r.GetString() : null;
+            }
+            catch (System.Text.Json.JsonException) { return BadRequest("invalid JSON"); }
+            if (string.IsNullOrWhiteSpace(publicKey)) return BadRequest("publicKey required");
+            var node = (await _storageService.GetNodesAsync()).FirstOrDefault(n => n.PublicKey == publicKey.Trim());
+            if (node == null) return NotFound("node not found");
+            if (!node.IsActive) return Ok(new { node.Id, node.PublicKey, isActive = false, note = "already inactive" });
+            if (!await _storageService.SetNodeActiveAsync(node.Id, false)) return StatusCode(500, "could not update node");
+            System.Console.WriteLine($"[ADMIN] Store {node.PublicKey} ({node.Endpoint} {node.TcpEndpoint}) deactivated: {reason}");
+            return Ok(new { node.Id, node.PublicKey, isActive = false });
+        }
+
+        /// <summary>
+        /// Super Admin issues one-shot node vouchers (Store or Block Creator registration). Body {"codes":["…"]};
+        /// a code must be 8–64 characters of A–Z, 0–9 and '-'. Returns which codes were added.
+        /// </summary>
+        [HttpPost("admin/vouchers")]
+        public async Task<IActionResult> AddVouchers()
+        {
+            Request.EnableBuffering();
+            string raw;
+            using (var reader = new System.IO.StreamReader(Request.Body, leaveOpen: true)) raw = await reader.ReadToEndAsync();
+            Request.Body.Position = 0;
+            if (_auth == null) return StatusCode(500, "auth unavailable");
+            var (ok, err) = _auth.ValidateSuperAdminRequest(Request, raw);
+            if (!ok) return Unauthorized(err);
+
+            var codes = new List<string>();
+            try
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(raw);
+                if (doc.RootElement.TryGetProperty("codes", out var arr) && arr.ValueKind == System.Text.Json.JsonValueKind.Array)
+                    foreach (var c in arr.EnumerateArray()) if (c.GetString() is { } v) codes.Add(v.Trim());
+            }
+            catch (System.Text.Json.JsonException) { return BadRequest("invalid JSON"); }
+            if (codes.Count is 0 or > 100) return BadRequest("codes: 1 to 100 vouchers");
+            var bad = codes.Where(c => !System.Text.RegularExpressions.Regex.IsMatch(c, "^[A-Z0-9-]{8,64}$")).ToList();
+            if (bad.Count > 0) return BadRequest("invalid code format (A-Z, 0-9, '-', 8-64 chars)");
+            var added = new List<string>();
+            foreach (var c in codes.Distinct())
+                if (await _storageService.AddVoucherAsync(c)) added.Add(c);
+            return Ok(new { added = added.Count, skipped = codes.Distinct().Count() - added.Count });
+        }
+
         [HttpPost("admin/rekey")]
         public async Task<IActionResult> Rekey()
         {

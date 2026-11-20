@@ -17,7 +17,7 @@ namespace deltanium_api.Tests.Services
     {
         [Theory]
         [InlineData("tcps://store-1.deltanium.com:7333", true)]
-        [InlineData("tcp://localhost:7333", true)]
+        [InlineData("tcp://localhost:7333", false)]                // local only when Central runs in Development
         [InlineData("tcp://store-1.deltanium.com:7333", false)] // plain TCP only for local dev
         [InlineData("https://store-1.deltanium.com", false)]
         [InlineData("tcps://store-1.deltanium.com", false)]       // port required
@@ -35,6 +35,17 @@ namespace deltanium_api.Tests.Services
         [InlineData("tcps://auto:7333", false)]                   // must be resolved first
         public void Tcp_endpoint_validation(string value, bool ok) =>
             NodeAddress.IsAcceptableTcp(value).Should().Be(ok);
+
+        [Fact]
+        public void Local_endpoints_only_in_development()
+        {
+            NodeAddress.IsAcceptableHttps("http://localhost:5001").Should().BeFalse();
+            NodeAddress.IsAcceptableHttps("https://127.0.0.1:5001").Should().BeFalse();
+            NodeAddress.IsAcceptableHttps("https://10.0.0.5").Should().BeFalse();
+            NodeAddress.IsAcceptableHttps("http://store-1.deltanium.com").Should().BeFalse();
+            NodeAddress.IsAcceptableHttps("https://store-1.deltanium.com").Should().BeTrue();
+            NodeAddress.IsAcceptableHttps("https://203.0.113.7").Should().BeTrue();
+        }
 
         [Fact]
         public void Https_endpoint_wins_when_a_node_has_both()

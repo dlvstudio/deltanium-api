@@ -81,6 +81,15 @@ namespace DeltaniumApi.Services
             return JsonConvert.DeserializeObject<List<Voucher>>(json) ?? new List<Voucher>();
         }
 
+        public async Task<bool> AddVoucherAsync(string code)
+        {
+            var vouchers = await GetVouchersAsync();
+            if (vouchers.Any(v => v.Code == code)) return false;
+            vouchers.Add(new Voucher { Code = code, Used = false });
+            await File.WriteAllTextAsync(_vouchersFilePath, JsonConvert.SerializeObject(vouchers, Formatting.Indented));
+            return true;
+        }
+
         public async Task<List<UserFollow>> GetUserFollowsAsync()
         {
             var json = await File.ReadAllTextAsync(_userFollowsFilePath);
@@ -147,6 +156,16 @@ namespace DeltaniumApi.Services
             var nodes = await GetNodesAsync();
             nodes.Add(node);
             await File.WriteAllTextAsync(_nodesFilePath, JsonConvert.SerializeObject(nodes, Formatting.Indented));
+        }
+
+        public async Task<bool> SetNodeActiveAsync(string nodeId, bool active)
+        {
+            var nodes = await GetNodesAsync();
+            var node = nodes.FirstOrDefault(n => n.Id == nodeId);
+            if (node == null) return false;
+            node.IsActive = active;
+            await File.WriteAllTextAsync(_nodesFilePath, JsonConvert.SerializeObject(nodes, Formatting.Indented));
+            return true;
         }
 
         public async Task<bool> UpdateNodePublicKeyAsync(string nodeId, string publicKey)

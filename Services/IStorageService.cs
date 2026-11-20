@@ -22,12 +22,16 @@ namespace DeltaniumApi.Services
         Task<bool> UpdateNodePublicKeyAsync(string nodeId, string publicKey);
         /// <summary>Set a Store's HTTPS endpoint ("" for none) and DLTP endpoint (null for none).</summary>
         Task<bool> UpdateNodeEndpointsAsync(string nodeId, string endpoint, string? tcpEndpoint);
+        /// <summary>Turn a Store node on or off (inactive nodes get no new files, challenges or repairs).</summary>
+        Task<bool> SetNodeActiveAsync(string nodeId, bool active) => Task.FromResult(false);
         Task SaveStoredFileAsync(StoredFile file);
         Task<bool> IsPublicKeyRegisteredAsync(string publicKey);
         Task<List<StoreNode>> GetActiveNodesAsync();
         Task<List<StoreNode>> GetNodesStoringUserFilesAsync(string ownerPublicKey);
         Task<List<StoredFile>> GetUserFilesOnNodeAsync(string ownerPublicKey, string nodeId);
         Task<bool> IsVoucherValidAsync(string code);
+        /// <summary>Add an unused voucher; false if the code already exists.</summary>
+        Task<bool> AddVoucherAsync(string code) => Task.FromResult(false);
         Task MarkVoucherUsedAsync(string code);
         /// <summary>Atomically mark voucher used; returns false if missing or already used.</summary>
         Task<bool> TryMarkVoucherUsedAsync(string code);

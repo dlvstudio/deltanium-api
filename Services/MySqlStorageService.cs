@@ -104,6 +104,15 @@ namespace DeltaniumApi.Services
             return true;
         }
 
+        public async Task<bool> SetNodeActiveAsync(string nodeId, bool active)
+        {
+            var node = await _db.StoreNodes.FirstOrDefaultAsync(n => n.Id == nodeId);
+            if (node == null) return false;
+            node.IsActive = active;
+            await _db.SaveChangesAsync();
+            return true;
+        }
+
         public async Task<bool> UpdateNodeEndpointsAsync(string nodeId, string endpoint, string? tcpEndpoint)
         {
             var node = await _db.StoreNodes.FirstOrDefaultAsync(n => n.Id == nodeId);
@@ -167,6 +176,14 @@ namespace DeltaniumApi.Services
             _db.StoredFiles.AsNoTracking()
                 .Where(f => f.OwnerPublicKey == ownerPublicKey && f.StoreNodeId == nodeId && f.IsActive)
                 .ToListAsync();
+
+        public async Task<bool> AddVoucherAsync(string code)
+        {
+            if (await _db.Vouchers.AnyAsync(v => v.Code == code)) return false;
+            _db.Vouchers.Add(new Voucher { Code = code, Used = false });
+            await _db.SaveChangesAsync();
+            return true;
+        }
 
         public Task<bool> IsVoucherValidAsync(string code) =>
             _db.Vouchers.AsNoTracking().AnyAsync(v => v.Code == code && !v.Used);
