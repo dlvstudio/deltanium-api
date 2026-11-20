@@ -23,6 +23,10 @@ namespace DeltaniumApi.Controllers
             public string? TcpEndpoint { get; set; }
             public string Voucher { get; set; }
             public string PublicKey { get; set; }
+            /// <summary>Unix seconds; with Signature, proof that the registrant holds the node key.</summary>
+            public long Timestamp { get; set; }
+            /// <summary>Node key signature (base64 DER) over NodeRegistrationService.RegistrationMessage.</summary>
+            public string? Signature { get; set; }
         }
 
         public class NodeRegistrationResponse
@@ -53,57 +57,20 @@ namespace DeltaniumApi.Controllers
             _storageService = storageService;
         }
 
+        /// <summary>
+        /// Ask to join (see NodeRegistrationService): signed with the node key, checked voucher, then 202 with the
+        /// registration fee to pay. The node becomes active after the Super Admin approves the fee and it answers.
+        /// </summary>
         [HttpPost("register")]
-        public async Task<ActionResult<NodeRegistrationResponse>> Register([FromBody] NodeRegistrationRequest request)
+        public async Task<IActionResult> Register([FromBody] NodeRegistrationRequest request)
         {
-            // A node is reachable over HTTPS, over DLTP (TCP), or both — at least one.
-            var httpsEndpoint = (request.Endpoint ?? "").Trim().TrimEnd('/');
-            // "tcps://auto:PORT": the public IP this registration comes from (a node on a home computer has no domain).
-            var tcpEndpoint = string.IsNullOrWhiteSpace(request.TcpEndpoint) ? null
-                : NodeAddress.ResolveAuto(request.TcpEndpoint.Trim().TrimEnd('/'), HttpContext?.Connection.RemoteIpAddress);
-            if (httpsEndpoint.Length == 0 && tcpEndpoint == null)
-                return BadRequest("Endpoint (https) or TcpEndpoint (tcps://host:port) is required");
-            if (httpsEndpoint.Length > 0 && !NodeAddress.IsAcceptableHttps(httpsEndpoint))
-                return BadRequest("Endpoint must be an https:// URL");
-            if (tcpEndpoint != null && !NodeAddress.IsAcceptableTcp(tcpEndpoint))
-                return BadRequest("TcpEndpoint must look like tcps://host:port or tcps://<public IP>:port");
-            if (string.IsNullOrWhiteSpace(request.Voucher))
-            {
-                return BadRequest("Voucher is required");
-            }
-            if (string.IsNullOrWhiteSpace(request.PublicKey))
-            {
-                return BadRequest("PublicKey is required");
-            }
-            // Check if node already registered by public key
-            var existingNodes = await _storageService.GetNodesAsync();
-            if (existingNodes.Any(n => n.PublicKey == request.PublicKey))
-            {
-                return Conflict("Store node already registered");
-            }
-
-            // Atomic voucher consume (prevents double registration races)
-            if (!await _storageService.TryMarkVoucherUsedAsync(request.Voucher))
-            {
-                return BadRequest("Invalid or already used voucher");
-            }
-
-            var node = new StoreNode
-            {
-                PublicKey = request.PublicKey,
-                Endpoint = httpsEndpoint,
-                TcpEndpoint = tcpEndpoint
-            };
-
-            await _storageService.SaveNodeAsync(node);
-
-            return new NodeRegistrationResponse
-            {
-                Id = node.Id,
-                PublicKey = node.PublicKey,
-                Endpoint = node.Endpoint,
-                TcpEndpoint = node.TcpEndpoint
-            };
+            if (HttpContext?.RequestServices.GetService(typeof(NodeRegistrationService)) is not NodeRegistrationService regs)
+                return StatusCode(500, "registration unavailable");
+            var r = await regs.SubmitAsync("store", request.Endpoint, request.TcpEndpoint, request.Voucher, request.PublicKey,
+                request.Timestamp, request.Signature, HttpContext.Connection.RemoteIpAddress);
+            if (r.Registration == null) return StatusCode(r.Status, r.Error);
+            var config = (Microsoft.Extensions.Configuration.IConfiguration)HttpContext.RequestServices.GetService(typeof(Microsoft.Extensions.Configuration.IConfiguration))!;
+            return StatusCode(202, NodeRegistrationController.PublicView(r.Registration, config));
         }
 
         /// <summary>
@@ -288,7 +255,8 @@ namespace DeltaniumApi.Controllers
         [HttpGet("list")]
         public async Task<ActionResult<List<StoreNode>>> ListNodes()
         {
-            var nodes = await _storageService.GetActiveNodesAsync();
+            var nodes = NodeOnline.Filter(await _storageService.GetActiveNodesAsync(), n => n.LastSeen,
+                HttpContext?.RequestServices.GetService(typeof(Microsoft.Extensions.Configuration.IConfiguration)) as Microsoft.Extensions.Configuration.IConfiguration);
             // v2 §8: when bonds are enforced, only nodes with the minimum bond are offered to clients.
             if (!_econ.EnforceBonds) return nodes;
             await _wallet.EnsureReadyAsync();

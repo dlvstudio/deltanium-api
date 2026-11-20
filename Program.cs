@@ -95,6 +95,7 @@ var connectionString = builder.Configuration.GetConnectionString("Default");
 
 builder.Services.AddSingleton<KeyService>();
 builder.Services.AddScoped<SignatureAuthHelper>();
+builder.Services.AddScoped<NodeRegistrationService>();
 // Requests to TCP-only nodes go over DLTP; everything else over HTTP(S) as before.
 builder.Services.AddTransient<DeltaniumApi.Services.Dltp.DltpRoutingHandler>();
 builder.Services.ConfigureHttpClientDefaults(b => b.AddHttpMessageHandler<DeltaniumApi.Services.Dltp.DltpRoutingHandler>());

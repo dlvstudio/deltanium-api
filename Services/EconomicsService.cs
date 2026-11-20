@@ -743,6 +743,7 @@ namespace DeltaniumApi.Services
             var candidates = nodes.Values
                 .Where(n => n.IsActive && !e.StoreNodeIds.Contains(n.Id) && NodeAddress.Of(n.Endpoint, n.TcpEndpoint, n.PublicKey).Length > 0)
                 .OrderBy(_ => Random.Shared.Next()).ToList();
+            candidates = NodeOnline.Filter(candidates, n => n.LastSeen, _config); // never copy to a node that does not answer
             if (EnforceBonds) candidates = await FilterStoreNodesByBondAsync(candidates);
 
             var added = 0;

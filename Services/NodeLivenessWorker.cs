@@ -46,6 +46,14 @@ namespace DeltaniumApi.Services
                         await storage.TouchNodeLastSeenAsync(n.Role, n.PublicKey, report.CheckedAt);
                     _log.LogInformation("Node liveness: {Online}/{Total} online",
                         online.Count, report.Blockers.Count + report.Stores.Count);
+
+                    // Registrations whose fee the Super Admin approved: activate the nodes that now answer.
+                    var regs = scope.ServiceProvider.GetService<NodeRegistrationService>();
+                    if (regs != null)
+                    {
+                        var activated = await regs.ActivateApprovedAsync();
+                        if (activated > 0) _log.LogInformation("Node registrations: {Count} node(s) activated", activated);
+                    }
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
