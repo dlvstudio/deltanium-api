@@ -407,6 +407,8 @@ namespace deltanium_api.Tests.Services
         [InlineData("subscribers:2026-11", true)]
         [InlineData("subscribers:2026-13", false)]
         [InlineData("followers:2026", false)]
+        [InlineData("subscribers-v2:2026-11", true)]   // PRE v2: per-tag author keys
+        [InlineData("followers-v2:2026-11", false)]
         public void Subscriber_tag_parsing(string tag, bool expected) =>
             EconomicsService.TryParseSubscriberTag(tag, out _).Should().Be(expected);
 

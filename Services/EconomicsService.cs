@@ -1230,12 +1230,18 @@ namespace DeltaniumApi.Services
         public async Task<List<Subscription>> ListSubscriptionsOfAsync(string subscriber) =>
             await _docs.ListAsync<Subscription>(CSub, s => SameKey(s.SubscriberPublicKey, subscriber));
 
-        /// <summary>For "subscribers:YYYY-MM" policy tags: is the requester entitled to the rekey?</summary>
+        /// <summary>
+        /// For "subscribers:YYYY-MM" policy tags (and "subscribers-v2:YYYY-MM", PRE v2 with per-tag author keys):
+        /// is the requester entitled to the rekey?
+        /// </summary>
         public static bool TryParseSubscriberTag(string? tag, out string epoch)
         {
             epoch = "";
-            if (tag == null || !tag.StartsWith("subscribers:", StringComparison.Ordinal)) return false;
-            epoch = tag["subscribers:".Length..];
+            if (tag == null) return false;
+            var prefix = tag.StartsWith("subscribers:", StringComparison.Ordinal) ? "subscribers:"
+                : tag.StartsWith("subscribers-v2:", StringComparison.Ordinal) ? "subscribers-v2:" : null;
+            if (prefix == null) return false;
+            epoch = tag[prefix.Length..];
             return DateTime.TryParseExact(epoch + "-01", "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out _);
         }
 

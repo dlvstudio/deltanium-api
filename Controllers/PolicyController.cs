@@ -92,7 +92,8 @@ namespace DeltaniumApi.Controllers
 			    string.IsNullOrWhiteSpace(tag) || string.IsNullOrWhiteSpace(rk))
 				return BadRequest("Missing required fields: followerPubKey, tag, rk");
 
-			var isFollower = await _storageService.IsFollowingAsync(follower, following);
+			// rk A->A lets the author read their own PRE posts through the same path as followers.
+			var isFollower = SameUser(follower, following) || await _storageService.IsFollowingAsync(follower, following);
 			if (!isFollower)
 				return BadRequest("Follower relationship does not exist");
 
@@ -176,9 +177,9 @@ namespace DeltaniumApi.Controllers
 							continue; // Skip invalid entries
 						
 						// Verify follower relationship
-						var isFollower = await _storageService.IsFollowingAsync(follower, following);
+						var isFollower = SameUser(follower, following) || await _storageService.IsFollowingAsync(follower, following);
 						if (!isFollower)
-							continue; // Skip non-followers
+							continue; // Skip non-followers (the author's own rk A->A is kept)
 						
 						rekeys.Add(new UserRekey
 						{
@@ -246,7 +247,7 @@ namespace DeltaniumApi.Controllers
 					return BadRequest("Missing required fields: followingPubKey, tag");
 
 				// v2 §9: "subscribers:YYYY-MM" tags require a paid subscription for that epoch instead of a follow.
-				if (EconomicsService.TryParseSubscriberTag(tag, out var subEpoch))
+				if (EconomicsService.TryParseSubscriberTag(tag, out var subEpoch) && !SameUser(requester, following))
 				{
 					await _wallet.EnsureReadyAsync();
 					if (!await _econ.IsSubscribedAsync(requester, following, subEpoch))
@@ -255,7 +256,7 @@ namespace DeltaniumApi.Controllers
 				else
 				{
 					// Verify B follows A
-					var isFollowing = await _storageService.IsFollowingAsync(requester, following);
+					var isFollowing = SameUser(requester, following) || await _storageService.IsFollowingAsync(requester, following);
 					if (!isFollowing)
 						return Unauthorized("You must be following this user to access their content");
 				}
@@ -332,7 +333,7 @@ namespace DeltaniumApi.Controllers
 				var exp = payload.TryGetProperty("exp", out var ex) ? ex.GetDateTime() : DateTime.MinValue;
 				if (exp < DateTime.UtcNow) return Unauthorized("token expired");
 				
-				if (EconomicsService.TryParseSubscriberTag(tag, out var subEpoch))
+				if (EconomicsService.TryParseSubscriberTag(tag, out var subEpoch) && !SameUser(follower, following))
 				{
 					await _wallet.EnsureReadyAsync();
 					if (!await _econ.IsSubscribedAsync(follower!, following!, subEpoch))
@@ -351,5 +352,9 @@ namespace DeltaniumApi.Controllers
 			}
 		}
 
+
+		private static bool SameUser(string? a, string? b) =>
+			!string.IsNullOrWhiteSpace(a) && !string.IsNullOrWhiteSpace(b) &&
+			string.Equals(SignatureAuthHelper.NormalizePubKey(a.Trim()), SignatureAuthHelper.NormalizePubKey(b.Trim()), StringComparison.OrdinalIgnoreCase);
 	}
 }

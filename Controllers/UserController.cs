@@ -81,11 +81,6 @@ namespace DeltaniumApi.Controllers
         [HttpPost("register")]
         public async Task<ActionResult<User>> Register([FromBody] SignedRegisterRequest request)
         {
-            // Sybil brake: free-tier accounts are cheap to make, so cap new accounts per client IP per day.
-            var ip = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
-            if (!RegistrationLimiter.TryAcquire(ip, MaxRegistrationsPerIpPerDay))
-                return StatusCode(429, "Too many new accounts from this network today; try again tomorrow");
-
             // Validate email format
             if (string.IsNullOrWhiteSpace(request.Email) || !request.Email.Contains("@"))
             {
@@ -140,6 +135,12 @@ namespace DeltaniumApi.Controllers
                 Signature = request.Signature, // Save signature for blockchain operations
                 RegistrationTimestamp = request.Timestamp // Save registration timestamp
             };
+
+            // Sybil brake: free-tier accounts are cheap to make, so cap new accounts per client IP per day. Counted only
+            // here, for an account that is really created (rejected and duplicate requests do not use the quota).
+            var ip = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+            if (!RegistrationLimiter.TryAcquire(ip, MaxRegistrationsPerIpPerDay))
+                return StatusCode(429, "Too many new accounts from this network today; try again tomorrow");
 
             await _storageService.SaveUserAsync(user);
 
