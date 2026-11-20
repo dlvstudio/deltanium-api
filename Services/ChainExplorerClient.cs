@@ -190,7 +190,7 @@ namespace DeltaniumApi.Services
         {
             var nodes = await _storage.GetActiveBlockCreatorNodesAsync();
             return nodes
-                .Select(n => NodeAddress.Of(n.Endpoint, n.TcpEndpoint))
+                .Select(n => NodeAddress.Of(n.Endpoint, n.TcpEndpoint, n.PublicKey))
                 .Where(e => !string.IsNullOrWhiteSpace(e))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .Cast<string>()

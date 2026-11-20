@@ -73,7 +73,7 @@ namespace DeltaniumApi.Services
         private async Task<NodeHealth> ProbeAsync(string role, string? publicKey, string? endpoint, string? tcpEndpoint, DateTime lastSeen, bool chain)
         {
             // HTTPS when the node has it, otherwise its DLTP endpoint (routed by DltpRoutingHandler).
-            var baseUrl = NodeAddress.Of(endpoint, tcpEndpoint);
+            var baseUrl = NodeAddress.Of(endpoint, tcpEndpoint, publicKey);
             var n = new NodeHealth
             {
                 Role = role,

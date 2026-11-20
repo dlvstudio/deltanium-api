@@ -1,7 +1,10 @@
 using System;
 using System.Net;
 using System.Net.Http;
+using System.Net.Security;
 using System.Net.Sockets;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Threading.Tasks;
 using DeltaniumApi.Services.Dltp;
@@ -19,6 +22,17 @@ namespace deltanium_api.Tests.Services
         [InlineData("https://store-1.deltanium.com", false)]
         [InlineData("tcps://store-1.deltanium.com", false)]       // port required
         [InlineData("", false)]
+        [InlineData("tcps://203.0.113.7:7333", true)]             // public IP: home / personal computer
+        [InlineData("tcps://[2001:db8::7]:7333", true)]
+        [InlineData("tcps://192.168.1.20:7333", false)]           // private, loopback, CGNAT, link-local: never
+        [InlineData("tcps://10.0.0.5:7333", false)]
+        [InlineData("tcps://172.16.0.1:7333", false)]
+        [InlineData("tcps://127.0.0.1:7333", false)]
+        [InlineData("tcps://100.64.1.1:7333", false)]
+        [InlineData("tcps://169.254.1.1:7333", false)]
+        [InlineData("tcps://[fd00::1]:7333", false)]
+        [InlineData("tcps://[::1]:7333", false)]
+        [InlineData("tcps://auto:7333", false)]                   // must be resolved first
         public void Tcp_endpoint_validation(string value, bool ok) =>
             NodeAddress.IsAcceptableTcp(value).Should().Be(ok);
 
@@ -91,6 +105,81 @@ namespace deltanium_api.Tests.Services
                 res.Content.Headers.ContentType!.MediaType.Should().Be("text/plain");
                 (await res.Content.ReadAsStringAsync()).Should().Be($"GET /api/version?x=1 host=localhost:{port} sig=abc");
                 await server;
+            }
+            finally { listener.Stop(); }
+        }
+
+        [Fact]
+        public void Auto_endpoint_takes_the_callers_public_ip()
+        {
+            NodeAddress.ResolveAuto("tcps://auto:7333", IPAddress.Parse("203.0.113.7")).Should().Be("tcps://203.0.113.7:7333");
+            NodeAddress.ResolveAuto("tcps://auto:7333", IPAddress.Parse("::ffff:203.0.113.7")).Should().Be("tcps://203.0.113.7:7333");
+            NodeAddress.ResolveAuto("tcps://store.example.com:7333", IPAddress.Parse("203.0.113.7")).Should().Be("tcps://store.example.com:7333");
+
+            var home = DeltaniumApi.Controllers.StoreNodeController.ApplySelfEndpoint("", null, "{\"tcpEndpoint\":\"tcps://auto:7333\"}", IPAddress.Parse("203.0.113.7"));
+            home.Ok.Should().BeTrue();
+            home.Tcp.Should().Be("tcps://203.0.113.7:7333");
+
+            var lan = DeltaniumApi.Controllers.StoreNodeController.ApplySelfEndpoint("", null, "{\"tcpEndpoint\":\"tcps://auto:7333\"}", IPAddress.Parse("192.168.1.20"));
+            lan.Ok.Should().BeFalse();
+
+            var drop = DeltaniumApi.Controllers.StoreNodeController.ApplySelfEndpoint("https://s.example.com", "tcps://203.0.113.7:7333", "{\"tcpEndpoint\":\"\"}", null);
+            drop.Ok.Should().BeTrue();
+            drop.Tcp.Should().BeNull();
+        }
+
+        [Theory]
+        [InlineData(true, true)]    // the registered node: accepted
+        [InlineData(false, false)]  // someone else's key on that address: refused
+        public async Task Ip_endpoint_is_authenticated_with_the_node_key(bool realNode, bool accepted)
+        {
+            var nodeKey = new NBitcoin.Key();
+            var signingKey = realNode ? nodeKey : new NBitcoin.Key();
+            using var ec = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+            using var made = new CertificateRequest("CN=deltanium-node", ec, HashAlgorithmName.SHA256)
+                .CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(1));
+            using var cert = new X509Certificate2(made.Export(X509ContentType.Pkcs12));
+
+            var listener = new TcpListener(IPAddress.Loopback, 0);
+            listener.Start();
+            var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+            var server = Task.Run(async () =>
+            {
+                using var conn = await listener.AcceptTcpClientAsync();
+                await using var ssl = new SslStream(conn.GetStream());
+                await ssl.AuthenticateAsServerAsync(cert);
+                await DltpWire.ExpectPrefaceAsync(ssl, default);
+                await DltpWire.WritePrefaceAsync(ssl, default);
+                var hello = await DltpWire.ReadFrameAsync<DltpRequest>(ssl, default);
+                hello.Method.Should().Be("HELLO");
+                var msg = DltpIdentity.ProofMessage(DltpIdentity.CertHash(cert));
+                var proof = Convert.ToBase64String(signingKey.Sign(new NBitcoin.uint256(SHA256.HashData(Encoding.UTF8.GetBytes(msg)))).ToDER());
+                await DltpWire.WriteFrameAsync(ssl, new DltpResponse
+                {
+                    Id = 0, Status = 200,
+                    Headers = { ["X-Node-PubKey"] = nodeKey.PubKey.ToHex(), ["X-Node-Proof"] = proof }
+                }, default);
+                var req = await DltpWire.ReadFrameAsync<DltpRequest>(ssl, default);
+                await DltpWire.WriteFrameAsync(ssl, new DltpResponse { Id = req.Id, Status = 200, Body = Convert.ToBase64String(Encoding.UTF8.GetBytes("ok")) }, default);
+            });
+
+            try
+            {
+                // 127.0.0.1 stands in for a public IP here; the target carries the key Central has on record.
+                var target = new DltpTarget(true, "127.0.0.1", port, nodeKey.PubKey.ToHex());
+                target.KeyMode.Should().BeTrue();
+                using var msg = new HttpRequestMessage(HttpMethod.Get, $"https://127.0.0.1:{port}/api/version");
+                if (accepted)
+                {
+                    using var res = await DltpRoutingHandler.SendDltpAsync(target, msg, default);
+                    (await res.Content.ReadAsStringAsync()).Should().Be("ok");
+                    await server;
+                }
+                else
+                {
+                    var act = () => DltpRoutingHandler.SendDltpAsync(target, msg, default);
+                    await act.Should().ThrowAsync<HttpRequestException>().WithMessage("*did not prove*");
+                }
             }
             finally { listener.Stop(); }
         }

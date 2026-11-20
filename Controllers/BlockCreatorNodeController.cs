@@ -140,6 +140,30 @@ namespace DeltaniumApi.Controllers
             return Ok(new { node.Id, node.PublicKey, endpoint = r.Https, tcpEndpoint = r.Tcp });
         }
 
+        /// <summary>The Block Creator sets or clears its own DLTP endpoint, signed with its node key (see StoreNodeController.SelfEndpoints).</summary>
+        [HttpPost("self/endpoints")]
+        public async Task<IActionResult> SelfEndpoints()
+        {
+            Request.EnableBuffering();
+            string body;
+            using (var reader = new StreamReader(Request.Body, leaveOpen: true)) body = await reader.ReadToEndAsync();
+            Request.Body.Position = 0;
+            if (HttpContext.RequestServices.GetService(typeof(SignatureAuthHelper)) is not SignatureAuthHelper auth)
+                return StatusCode(500, "auth unavailable");
+            var (ok, signer, err) = await auth.ValidateAsync(Request, body, requireRegisteredUser: false);
+            if (!ok) return Unauthorized(err);
+            var node = await _storageService.GetBlockCreatorNodeByPublicKeyAsync(signer!.Trim());
+            if (node == null || !node.IsActive) return NotFound("not an active registered Block Creator");
+            var r = StoreNodeController.ApplySelfEndpoint(node.Endpoint, node.TcpEndpoint, body, HttpContext?.Connection.RemoteIpAddress);
+            if (!r.Ok) return BadRequest(r.Error);
+            if (r.Tcp != node.TcpEndpoint)
+            {
+                node.TcpEndpoint = r.Tcp;
+                await _storageService.UpdateBlockCreatorNodeAsync(node);
+            }
+            return Ok(new { node.Id, node.PublicKey, endpoint = node.Endpoint, tcpEndpoint = r.Tcp });
+        }
+
         private IActionResult? AdminDenied(string body)
         {
             if (Request.Headers.TryGetValue("X-SuperAdmin-Request-Signature", out var saSig) &&
@@ -183,13 +207,15 @@ namespace DeltaniumApi.Controllers
         {
             // A node is reachable over HTTPS, over DLTP (TCP), or both — at least one.
             var httpsEndpoint = (request.Endpoint ?? "").Trim().TrimEnd('/');
-            var tcpEndpoint = string.IsNullOrWhiteSpace(request.TcpEndpoint) ? null : request.TcpEndpoint.Trim().TrimEnd('/');
+            // "tcps://auto:PORT": the public IP this registration comes from (a node on a home computer has no domain).
+            var tcpEndpoint = string.IsNullOrWhiteSpace(request.TcpEndpoint) ? null
+                : NodeAddress.ResolveAuto(request.TcpEndpoint.Trim().TrimEnd('/'), HttpContext?.Connection.RemoteIpAddress);
             if (httpsEndpoint.Length == 0 && tcpEndpoint == null)
                 return BadRequest("Endpoint (https) or TcpEndpoint (tcps://host:port) is required");
             if (httpsEndpoint.Length > 0 && !NodeAddress.IsAcceptableHttps(httpsEndpoint))
                 return BadRequest("Endpoint must be an https:// URL");
             if (tcpEndpoint != null && !NodeAddress.IsAcceptableTcp(tcpEndpoint))
-                return BadRequest("TcpEndpoint must look like tcps://host:port");
+                return BadRequest("TcpEndpoint must look like tcps://host:port or tcps://<public IP>:port");
             if (string.IsNullOrWhiteSpace(request.Voucher))
             {
                 return BadRequest("Voucher is required");

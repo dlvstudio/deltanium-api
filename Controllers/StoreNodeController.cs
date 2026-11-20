@@ -58,13 +58,15 @@ namespace DeltaniumApi.Controllers
         {
             // A node is reachable over HTTPS, over DLTP (TCP), or both — at least one.
             var httpsEndpoint = (request.Endpoint ?? "").Trim().TrimEnd('/');
-            var tcpEndpoint = string.IsNullOrWhiteSpace(request.TcpEndpoint) ? null : request.TcpEndpoint.Trim().TrimEnd('/');
+            // "tcps://auto:PORT": the public IP this registration comes from (a node on a home computer has no domain).
+            var tcpEndpoint = string.IsNullOrWhiteSpace(request.TcpEndpoint) ? null
+                : NodeAddress.ResolveAuto(request.TcpEndpoint.Trim().TrimEnd('/'), HttpContext?.Connection.RemoteIpAddress);
             if (httpsEndpoint.Length == 0 && tcpEndpoint == null)
                 return BadRequest("Endpoint (https) or TcpEndpoint (tcps://host:port) is required");
             if (httpsEndpoint.Length > 0 && !NodeAddress.IsAcceptableHttps(httpsEndpoint))
                 return BadRequest("Endpoint must be an https:// URL");
             if (tcpEndpoint != null && !NodeAddress.IsAcceptableTcp(tcpEndpoint))
-                return BadRequest("TcpEndpoint must look like tcps://host:port");
+                return BadRequest("TcpEndpoint must look like tcps://host:port or tcps://<public IP>:port");
             if (string.IsNullOrWhiteSpace(request.Voucher))
             {
                 return BadRequest("Voucher is required");
@@ -125,7 +127,7 @@ namespace DeltaniumApi.Controllers
             var tcp = req.TcpEndpoint == null ? currentTcp : (req.TcpEndpoint.Trim().Length == 0 ? null : req.TcpEndpoint.Trim().TrimEnd('/'));
             if (https.Length == 0 && tcp == null) return (false, "A node needs an https Endpoint or a TcpEndpoint", "", null);
             if (https.Length > 0 && !NodeAddress.IsAcceptableHttps(https)) return (false, "Endpoint must be an https:// URL", "", null);
-            if (tcp != null && !NodeAddress.IsAcceptableTcp(tcp)) return (false, "TcpEndpoint must look like tcps://host:port", "", null);
+            if (tcp != null && !NodeAddress.IsAcceptableTcp(tcp)) return (false, "TcpEndpoint must look like tcps://host:port or tcps://<public IP>:port", "", null);
             return (true, "", https, tcp);
         }
 
@@ -151,6 +153,46 @@ namespace DeltaniumApi.Controllers
             if (!r.Ok) return BadRequest(r.Error);
             await _storageService.UpdateNodeEndpointsAsync(node.Id, r.Https, r.Tcp);
             return Ok(new { node.Id, node.PublicKey, endpoint = r.Https, tcpEndpoint = r.Tcp });
+        }
+
+        /// <summary>
+        /// The node itself sets or clears its DLTP endpoint, signed with its node key (X-User-PubKey / X-Timestamp /
+        /// X-Signature). "tcps://auto:PORT" means "the public IP you see me calling from", for nodes on a home or
+        /// personal computer whose IP changes. The HTTPS endpoint is not changed here.
+        /// </summary>
+        [HttpPost("self/endpoints")]
+        public async Task<IActionResult> SelfEndpoints()
+        {
+            Request.EnableBuffering();
+            string raw;
+            using (var reader = new System.IO.StreamReader(Request.Body, leaveOpen: true)) raw = await reader.ReadToEndAsync();
+            Request.Body.Position = 0;
+            if (_auth == null) return StatusCode(500, "auth unavailable");
+            var (ok, signer, err) = await _auth.ValidateAsync(Request, raw, requireRegisteredUser: false);
+            if (!ok) return Unauthorized(err);
+            var node = (await _storageService.GetNodesAsync()).FirstOrDefault(n => n.IsActive &&
+                string.Equals(SignatureAuthHelper.NormalizePubKey(n.PublicKey.Trim()), SignatureAuthHelper.NormalizePubKey(signer!), System.StringComparison.OrdinalIgnoreCase));
+            if (node == null) return NotFound("not an active registered Store");
+            var r = ApplySelfEndpoint(node.Endpoint, node.TcpEndpoint, raw, HttpContext?.Connection.RemoteIpAddress);
+            if (!r.Ok) return BadRequest(r.Error);
+            if (r.Tcp != node.TcpEndpoint) await _storageService.UpdateNodeEndpointsAsync(node.Id, r.Https, r.Tcp);
+            return Ok(new { node.Id, node.PublicKey, endpoint = r.Https, tcpEndpoint = r.Tcp });
+        }
+
+        /// <summary>Parse {"tcpEndpoint": "..."} from a node, fill in "auto" from the caller's IP, and validate.</summary>
+        public static (bool Ok, string Error, string Https, string? Tcp) ApplySelfEndpoint(string currentHttps, string? currentTcp, string rawJson, System.Net.IPAddress? remote)
+        {
+            string? requested;
+            try
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(string.IsNullOrWhiteSpace(rawJson) ? "{}" : rawJson);
+                requested = doc.RootElement.TryGetProperty("tcpEndpoint", out var t) && t.ValueKind == System.Text.Json.JsonValueKind.String ? t.GetString() : null;
+            }
+            catch (System.Text.Json.JsonException) { return (false, "invalid JSON", "", null); }
+            if (requested == null) return (false, "tcpEndpoint required (\"\" removes it)", "", null);
+            var tcp = requested.Trim().Length == 0 ? "" : NodeAddress.ResolveAuto(requested, remote);
+            if (tcp == null) return (false, "could not tell your public IP", "", null);
+            return ApplyEndpoints(currentHttps, currentTcp, new NodeEndpointsRequest { TcpEndpoint = tcp });
         }
 
         [HttpPost("admin/rekey")]

@@ -48,7 +48,7 @@ namespace DeltaniumApi.Services
 
             foreach (var node in blockers)
             {
-                var endpoint = NodeAddress.Of(node.Endpoint, node.TcpEndpoint);
+                var endpoint = NodeAddress.Of(node.Endpoint, node.TcpEndpoint, node.PublicKey);
                 if (string.IsNullOrEmpty(endpoint)) continue;
                 try
                 {
