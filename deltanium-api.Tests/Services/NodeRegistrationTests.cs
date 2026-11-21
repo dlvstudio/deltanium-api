@@ -140,6 +140,36 @@ namespace deltanium_api.Tests.Services
         }
 
         [Fact]
+        public async Task Rejected_registrations_cannot_be_approved_and_keep_the_voucher()
+        {
+            var svc = Service();
+            var reg = (await Register(svc, new Key(), "V-ONE")).Registration!;
+            var r = await svc.RejectAsync(reg.Id, "payment not received");
+            r.Status.Should().Be(200);
+            r.Registration!.Status.Should().Be("rejected");
+            r.Registration.Reason.Should().Be("payment not received");
+            (await svc.ApproveAsync(reg.Id, Sign(_superAdmin, NodeRegistrationService.ApprovalPayload(reg)))).Status.Should().Be(400);
+            _vouchers.Should().Contain("V-ONE", "a rejected registration never spends the voucher");
+            _stores.Should().BeEmpty();
+            (await svc.RejectAsync("missing", null)).Status.Should().Be(404);
+        }
+
+        [Fact]
+        public async Task Unpaid_registrations_expire_but_a_late_payment_can_still_be_approved()
+        {
+            var svc = Service();
+            var reg = (await Register(svc, new Key(), "V-ONE")).Registration!;
+            (await svc.ExpireUnpaidAsync(DateTime.UtcNow.AddDays(6))).Should().Be(0);
+            (await svc.ExpireUnpaidAsync(DateTime.UtcNow.AddDays(8))).Should().Be(1);
+            (await svc.ListAsync("awaiting_payment")).Should().BeEmpty();
+            (await svc.GetAsync(reg.Id))!.Status.Should().Be("expired");
+
+            var ok = await svc.ApproveAsync(reg.Id, Sign(_superAdmin, NodeRegistrationService.ApprovalPayload(reg)));
+            ok.Registration!.Status.Should().Be("active");
+            _vouchers.Should().NotContain("V-ONE");
+        }
+
+        [Fact]
         public void Only_recently_seen_nodes_are_offered_and_never_none()
         {
             var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>

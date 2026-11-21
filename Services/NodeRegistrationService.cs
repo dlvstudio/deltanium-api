@@ -21,7 +21,7 @@ namespace DeltaniumApi.Services
         public string? TcpEndpoint { get; set; }
         public string Voucher { get; set; } = "";
         public decimal FeeVnd { get; set; }
-        /// <summary>awaiting_payment, approved (fee confirmed, waiting for the node to answer), active, rejected.</summary>
+        /// <summary>awaiting_payment, expired (unpaid too long; can still be approved), approved (fee confirmed, waiting for the node to answer), active, rejected.</summary>
         public string Status { get; set; } = "awaiting_payment";
         public string? Reason { get; set; }
         public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
@@ -60,6 +60,9 @@ namespace DeltaniumApi.Services
             _keys = keys;
             _config = config;
         }
+
+        /// <summary>Unpaid registrations older than this become "expired" (Nodes:Registration:ExpireDays, 7; 0 = never).</summary>
+        public int ExpireDays => int.TryParse(_config["Nodes:Registration:ExpireDays"], out var d) && d >= 0 ? d : 7;
 
         public decimal FeeVnd => decimal.TryParse(_config["Nodes:Registration:FeeVnd"], out var f) && f >= 0 ? f : 100_000m;
 
@@ -137,7 +140,8 @@ namespace DeltaniumApi.Services
             var reg = await GetAsync(id);
             if (reg == null) return new(404, "Registration not found", null);
             if (reg.Status is "approved" or "active") return new(200, null, reg);
-            if (reg.Status != "awaiting_payment") return new(400, $"Registration is {reg.Status}", reg);
+            // An expired registration can still be approved: the payment may arrive late, and the node does not register again.
+            if (reg.Status is not ("awaiting_payment" or "expired")) return new(400, $"Registration is {reg.Status}", reg);
             var sa = _keys.GetSuperAdminPublicKey();
             if (string.IsNullOrWhiteSpace(sa) || !_keys.VerifySignature(sa, ApprovalPayload(reg), superAdminSignature))
                 return new(401, "Invalid Super Admin signature on the approval payload", reg);
@@ -170,6 +174,23 @@ namespace DeltaniumApi.Services
             reg.Reason = string.IsNullOrWhiteSpace(reason) ? "rejected by Super Admin" : reason.Trim();
             await SaveAsync(reg);
             return new(200, null, reg);
+        }
+
+        /// <summary>Unpaid registrations older than <see cref="ExpireDays"/> leave the approval list (run by NodeLivenessWorker).</summary>
+        public async Task<int> ExpireUnpaidAsync(DateTime? now = null)
+        {
+            if (ExpireDays == 0) return 0;
+            var cutoff = (now ?? DateTime.UtcNow).AddDays(-ExpireDays);
+            var expired = 0;
+            foreach (var reg in await ListAsync("awaiting_payment"))
+            {
+                if (reg.CreatedAt >= cutoff) continue;
+                reg.Status = "expired";
+                reg.Reason = $"registration fee not received within {ExpireDays} days";
+                await SaveAsync(reg);
+                expired++;
+            }
+            return expired;
         }
 
         /// <summary>Approved registrations: activate the ones whose node now answers (run by NodeLivenessWorker).</summary>

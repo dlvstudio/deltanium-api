@@ -118,6 +118,8 @@ namespace DeltaniumApi.Controllers
                     "approved" => "Fee approved. The network activates the node as soon as it answers on its endpoint (check port forwarding). / " +
                                   "Đã duyệt phí. Node được kích hoạt ngay khi trả lời ở địa chỉ đã đăng ký (kiểm tra mở cổng).",
                     "active" => "Active on the network. / Node đã hoạt động trên mạng.",
+                    "expired" => $"The registration fee was not received in time. If you paid, send the proof with the transfer content {content} to the Super Admin. / " +
+                                 $"Chưa nhận được phí đăng ký đúng hạn. Nếu đã chuyển, gửi chứng từ kèm nội dung {content} cho Super Admin.",
                     _ => r.Reason ?? r.Status
                 }
             };

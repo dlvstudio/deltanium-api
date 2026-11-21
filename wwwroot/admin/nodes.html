@@ -61,7 +61,7 @@
     .status-pending { color: var(--warn); }
     .status-completed, .status-active { color: var(--ok); }
     .status-awaiting_payment, .status-approved { color: var(--warn); }
-    .status-rejected { color: var(--err); }
+    .status-rejected, .status-expired { color: var(--err); }
     button.reject { background: var(--err); color: #fff; margin-left: 0.4rem; }
     .meta { color: var(--muted); font-size: 0.8rem; margin-top: 1rem; line-height: 1.5; }
     .note { font-size: 0.8rem; color: var(--muted); max-width: 44rem; margin: -0.5rem 0 1rem; }
@@ -85,6 +85,7 @@
         <option value="awaiting_payment" selected>awaiting_payment</option>
         <option value="approved">approved (waiting for the node)</option>
         <option value="active">active</option>
+        <option value="expired">expired (unpaid after the deadline)</option>
         <option value="rejected">rejected</option>
         <option value="all">all</option>
       </select>
@@ -177,7 +178,7 @@
         <th>Created</th><th>Role</th><th>Node key</th><th>Address</th><th>Fee</th><th>Transfer content</th><th>Status</th><th></th>
       </tr></thead><tbody>${rows.map((x, i) => {
         const r = x.registration;
-        const actions = r.status === "awaiting_payment"
+        const actions = (r.status === "awaiting_payment" || r.status === "expired")
           ? `<button type="button" class="approve" data-i="${i}">Approve</button><button type="button" class="reject" data-i="${i}">Reject</button>`
           : r.status === "approved" ? `<button type="button" class="reject" data-i="${i}">Reject</button>` : "";
         return `<tr>

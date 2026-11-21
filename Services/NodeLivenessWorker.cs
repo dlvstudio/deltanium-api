@@ -51,6 +51,8 @@ namespace DeltaniumApi.Services
                     var regs = scope.ServiceProvider.GetService<NodeRegistrationService>();
                     if (regs != null)
                     {
+                        var expired = await regs.ExpireUnpaidAsync();
+                        if (expired > 0) _log.LogInformation("Node registrations: {Count} unpaid registration(s) expired", expired);
                         var activated = await regs.ActivateApprovedAsync();
                         if (activated > 0) _log.LogInformation("Node registrations: {Count} node(s) activated", activated);
                     }
