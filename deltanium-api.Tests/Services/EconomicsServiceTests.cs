@@ -177,6 +177,29 @@ namespace deltanium_api.Tests.Services
         }
 
         [Fact]
+        public async Task Free_storage_off_bills_the_owner_but_keeps_social_items_free()
+        {
+            await Build(enforceFees: true, new() { ["Economics:FreeTier:StorageBytes"] = "0" });
+            await Fund(EconAccounts.NetworkFund, 1_000m);
+
+            var r = await _econ.OpenStorageEscrowAsync(Alice, "post1", 1024 * 1024, new[] { "sa", "sb" }, 12, null, Blocks());
+            r.Ok.Should().BeFalse();
+            r.Status.Should().Be(402); // Alice has an email but an empty wallet
+            (await _wallet.GetBalanceAsync(EconAccounts.NetworkFund)).Should().Be(1_000m);
+
+            await Fund(Alice, 100m);
+            r = await _econ.OpenStorageEscrowAsync(Alice, "post1", 1024 * 1024, new[] { "sa", "sb" }, 12, null, Blocks());
+            r.Ok.Should().BeTrue();
+            r.Escrow!.FreeTier.Should().BeFalse();
+            r.Escrow.PayerAccount.Should().Be(Alice);
+
+            var like = await _econ.OpenStorageEscrowAsync(Alice, "like1", 600, new[] { "sa", "sb" }, 12, null, null, social: true);
+            like.Ok.Should().BeTrue();
+            like.Escrow!.Social.Should().BeTrue();
+            like.Escrow.PayerAccount.Should().BeEmpty();
+        }
+
+        [Fact]
         public async Task Free_tier_pays_for_actual_bytes_without_the_minimum_fee()
         {
             await Fund(EconAccounts.NetworkFund, 1_000m);
