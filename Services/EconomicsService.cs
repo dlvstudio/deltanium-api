@@ -252,7 +252,7 @@ namespace DeltaniumApi.Services
             target = Math.Max(1, target);
             // §10: social items (reaction, comment, chat message) are free. They use the free quota while it lasts;
             // beyond it they are recorded unfunded instead of charging the owner. Only small items qualify.
-            social = social && sizeBytes > 0 && sizeBytes <= SocialItemMaxBytes;
+            social = social && sizeBytes > 0 && sizeBytes <= SocialItemMaxBytes && SocialMonthlyBytes > 0;
             if (social && !string.IsNullOrWhiteSpace(owner) &&
                 await GetSocialBytesThisMonthAsync(owner, DateTime.UtcNow) + sizeBytes * target > SocialMonthlyBytes)
                 social = false;

@@ -221,6 +221,29 @@ namespace deltanium_api.Tests.Services
         }
 
         [Fact]
+        public async Task With_no_social_allowance_a_like_is_billed_like_any_item()
+        {
+            await Build(enforceFees: true, new()
+            {
+                ["Economics:FreeTier:StorageBytes"] = "0",
+                ["Economics:FreeTier:SocialMonthlyBytes"] = "0",
+                ["Economics:Storage:MinContractFee"] = "1",
+            });
+            await Fund(Alice, 10m);
+
+            var charge = await _econ.QuoteChargeAsync(Alice, 600, 1, 2, 12, social: true);
+            charge.Social.Should().BeFalse();
+            charge.OwnerPays.Should().Be(1m);
+            (await _econ.QuoteChargeAsync(null, 600, 1, 2, 12, social: true)).OwnerPays.Should().Be(1m); // no owner given
+
+            var like = await _econ.OpenStorageEscrowAsync(Alice, "like1", 600, new[] { "sa" }, 12, null, null, social: true, replicas: 2);
+            like.Ok.Should().BeTrue();
+            like.Escrow!.Social.Should().BeFalse();
+            like.Escrow.PayerAccount.Should().Be(Alice);
+            (await _wallet.GetBalanceAsync(Alice)).Should().Be(9m);
+        }
+
+        [Fact]
         public async Task Free_tier_pays_for_actual_bytes_without_the_minimum_fee()
         {
             await Fund(EconAccounts.NetworkFund, 1_000m);
