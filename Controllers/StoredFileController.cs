@@ -223,15 +223,21 @@ namespace DeltaniumApi.Controllers
             return Ok(new { fileId = req.FileId, cancelled = true, refunded });
         }
 
-        /// <summary>Price a storage contract before upload (§6). Optional owner enables the free-tier check.</summary>
+        /// <summary>
+        /// Price an item before upload (§6) with the same rules as register-replicas: pass the same fileSize,
+        /// the number of Stores it goes to (storeNodes), replicas, months and kind=social. <c>charge</c> is exactly
+        /// what registering it will take from the owner's wallet. Optional owner enables the free-tier and social checks.
+        /// </summary>
         [HttpGet("quote")]
         public async Task<ActionResult> Quote([FromQuery] long sizeBytes, [FromQuery] int replicas = 2,
-            [FromQuery] int months = 0, [FromQuery] string? owner = null)
+            [FromQuery] int months = 0, [FromQuery] string? owner = null, [FromQuery] int storeNodes = 0,
+            [FromQuery] string? kind = null)
         {
             if (sizeBytes <= 0) return BadRequest("sizeBytes required");
             await _wallet.EnsureReadyAsync();
-            var quote = await _econ.QuoteAsync(owner, sizeBytes, replicas, months);
-            return Ok(new { quote, enforceFees = _wallet.EnforceFees });
+            var c = await _econ.QuoteChargeAsync(owner, sizeBytes, Math.Max(0, storeNodes), replicas, months,
+                string.Equals(kind, "social", StringComparison.OrdinalIgnoreCase));
+            return Ok(new { quote = c.Quote, charge = c.OwnerPays, replicas = c.Replicas, social = c.Social, enforceFees = _wallet.EnforceFees });
         }
 
         /// <summary>Storage contract status for a file (Active | Grace | Expired | Lost | Closed).</summary>

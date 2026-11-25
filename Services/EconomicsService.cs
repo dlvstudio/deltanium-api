@@ -208,7 +208,8 @@ namespace DeltaniumApi.Services
             months = Math.Clamp(months <= 0 ? DefaultMonths : months, 1, MaxMonths);
             replicas = Math.Max(1, replicas);
             var monthly = MonthlyStorageFee(sizeBytes, replicas);
-            var total = Math.Max(MinContractFee, monthly * months);
+            // Whole 0.0001 D, so the fee an App shows (4 decimals) is exactly the fee charged.
+            var total = Math.Round(Math.Max(MinContractFee, monthly * months), 4, MidpointRounding.AwayFromZero);
             var quote = new StorageQuote
             {
                 SizeBytes = sizeBytes,
@@ -236,6 +237,30 @@ namespace DeltaniumApi.Services
             return quote;
         }
 
+        /// <summary>
+        /// Exactly what registering an item will take from its owner's wallet, using the same rules as
+        /// <see cref="OpenStorageEscrowAsync"/>: paid replica count, the social allowance, the free tier and
+        /// EnforceFees. Apps show <see cref="StorageCharge.OwnerPays"/> before uploading, so the fee shown is the fee charged.
+        /// </summary>
+        public async Task<StorageCharge> QuoteChargeAsync(string? owner, long sizeBytes, int storeNodeCount, int replicas,
+            int months, bool social)
+        {
+            // Paid replica count: at least the Stores uploaded to, at most MaxReplicas and the Stores that exist.
+            // Missing copies are made by the repair job from a Store that holds the file.
+            var activeStores = (await _storage.GetActiveNodesAsync())?.Count ?? 0;
+            var target = Math.Max(storeNodeCount, Math.Min(replicas, Math.Min(MaxReplicas, Math.Max(activeStores, 1))));
+            target = Math.Max(1, target);
+            // §10: social items (reaction, comment, chat message) are free. They use the free quota while it lasts;
+            // beyond it they are recorded unfunded instead of charging the owner. Only small items qualify.
+            social = social && sizeBytes > 0 && sizeBytes <= SocialItemMaxBytes;
+            if (social && !string.IsNullOrWhiteSpace(owner) &&
+                await GetSocialBytesThisMonthAsync(owner, DateTime.UtcNow) + sizeBytes * target > SocialMonthlyBytes)
+                social = false;
+            var quote = await QuoteAsync(owner, sizeBytes, target, months);
+            var ownerPays = !_wallet.EnforceFees || social || quote.FreeTier ? 0m : quote.TotalFee;
+            return new StorageCharge(quote, target, social, ownerPays);
+        }
+
         public async Task<StorageEscrow?> GetEscrowAsync(string fileId) => await _docs.GetAsync<StorageEscrow>(CEscrow, fileId);
 
         /// <summary>
@@ -247,19 +272,11 @@ namespace DeltaniumApi.Services
             string owner, string fileId, long sizeBytes, IReadOnlyList<string> storeNodeIds, int months,
             string? contractType, IReadOnlyList<FileBlockHash>? blocks, bool social = false, int replicas = 0)
         {
-            // Paid replica count: at least the Stores uploaded to, at most MaxReplicas and the Stores that exist.
-            // Missing copies are made by the repair job from a Store that holds the file.
-            var activeStores = (await _storage.GetActiveNodesAsync())?.Count ?? 0;
-            var target = Math.Max(storeNodeIds.Distinct().Count(), Math.Min(replicas, Math.Min(MaxReplicas, Math.Max(activeStores, 1))));
-            target = Math.Max(1, target);
-            // §10: social items (reaction, comment, chat message) are free. They use the free quota while it lasts;
-            // beyond it they are recorded unfunded instead of charging the owner. Only small items qualify.
-            social = social && sizeBytes > 0 && sizeBytes <= SocialItemMaxBytes;
-            if (social && await GetSocialBytesThisMonthAsync(owner, DateTime.UtcNow) + sizeBytes * target > SocialMonthlyBytes)
-            {
+            var charge = await QuoteChargeAsync(owner, sizeBytes, storeNodeIds.Distinct().Count(), replicas, months, social);
+            var target = charge.Replicas;
+            if (social && !charge.Social)
                 _log?.LogInformation("Social budget used up for {Owner}; {FileId} billed as a normal upload", owner, fileId);
-                social = false;
-            }
+            social = charge.Social;
             var existing = await GetEscrowAsync(fileId);
             if (existing != null)
             {
@@ -277,7 +294,7 @@ namespace DeltaniumApi.Services
             var type = string.Equals(contractType, "AutoRenew", StringComparison.OrdinalIgnoreCase) ||
                        string.Equals(contractType, "OpenEnded", StringComparison.OrdinalIgnoreCase)
                 ? "AutoRenew" : "TimeFixed";
-            var quote = await QuoteAsync(owner, sizeBytes, target, months);
+            var quote = charge.Quote;
             var escrow = new StorageEscrow
             {
                 Id = fileId,

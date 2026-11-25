@@ -258,6 +258,10 @@ namespace DeltaniumApi.Models
         public int LiveMismatchAccounts { get; set; }
     }
 
+    /// <summary>What registering one item costs its owner: the quote at the paid replica count, and the D taken from
+    /// the owner's wallet (0 for social items, the free tier, or while fees are not enforced).</summary>
+    public record StorageCharge(StorageQuote Quote, int Replicas, bool Social, decimal OwnerPays);
+
     public class StorageQuote
     {
         public long SizeBytes { get; set; }

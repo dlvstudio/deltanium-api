@@ -199,6 +199,27 @@ namespace deltanium_api.Tests.Services
             like.Escrow.PayerAccount.Should().BeEmpty();
         }
 
+        [Theory]
+        [InlineData(2_108L, 1, 2, false)]          // small post: the minimum contract fee
+        [InlineData(2_086_124L, 2, 0, false)]      // 2 MB image on two Stores
+        [InlineData(600L, 1, 2, true)]             // reaction: free
+        public async Task Quoted_charge_is_exactly_what_registering_takes(long size, int stores, int replicas, bool social)
+        {
+            await Build(enforceFees: true, new() { ["Economics:FreeTier:StorageBytes"] = "0", ["Economics:Storage:MinContractFee"] = "1" });
+            await Fund(Alice, 100m);
+            var storeIds = new[] { "sa", "sb" }.Take(stores).ToArray();
+
+            var charge = await _econ.QuoteChargeAsync(Alice, size, storeIds.Length, replicas, 12, social);
+            var r = await _econ.OpenStorageEscrowAsync(Alice, "item1", size, storeIds, 12, null, Blocks(), social, replicas);
+
+            r.Ok.Should().BeTrue();
+            (100m - await _wallet.GetBalanceAsync(Alice)).Should().Be(charge.OwnerPays);
+            r.Escrow!.StoreNodeIds.Count.Should().Be(stores);
+            if (social) charge.OwnerPays.Should().Be(0);
+            else charge.OwnerPays.Should().Be(Math.Round(Math.Max(1m, _econ.MonthlyStorageFee(size, charge.Replicas) * 12), 4, MidpointRounding.AwayFromZero));
+            (charge.OwnerPays * 10_000m % 1m).Should().Be(0m); // whole 0.0001 D
+        }
+
         [Fact]
         public async Task Free_tier_pays_for_actual_bytes_without_the_minimum_fee()
         {
