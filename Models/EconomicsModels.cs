@@ -74,6 +74,12 @@ namespace DeltaniumApi.Models
         /// <summary>Active | Grace | Expired | Lost | Closed</summary>
         public string Status { get; set; } = "Active";
         public DateTime? GraceUntil { get; set; }
+        /// <summary>When it became Expired or Closed. Stores delete the item's data <c>StoreDeleteAfterDays</c> later.</summary>
+        public DateTime? EndedAt { get; set; }
+        /// <summary>The owner deleted the item: it is never renewed or converted to monthly billing.</summary>
+        public bool RenewalStopped { get; set; }
+        /// <summary>An old prepaid (TimeFixed) contract switched to monthly billing when its term ran out.</summary>
+        public bool ConvertedToMonthly { get; set; }
         public List<string> FailedNodeIds { get; set; } = new();
         /// <summary>
         /// Stores that have returned a registered block with the right hash at least once. The block hashes come
@@ -86,6 +92,23 @@ namespace DeltaniumApi.Models
         public bool EgressCapped { get; set; }
         /// <summary>Replica count the owner paid for; repair keeps this many healthy copies (§6).</summary>
         public int TargetReplicas { get; set; }
+    }
+
+    /// <summary>What an owner must pay to keep their stored items (wallet warning).</summary>
+    public class RenewalStatus
+    {
+        public decimal Balance { get; set; }
+        /// <summary>Items whose renewal failed: kept until GraceUntil, then expired and deleted DeleteAfterDays later.</summary>
+        public int GraceCount { get; set; }
+        public decimal GraceFee { get; set; }
+        public DateTime? GraceUntil { get; set; }
+        /// <summary>Renewals due soon.</summary>
+        public int DueCount { get; set; }
+        public decimal DueFee { get; set; }
+        public DateTime? FirstDue { get; set; }
+        /// <summary>GraceFee + DueFee − Balance, at least 0: the top-up that keeps everything.</summary>
+        public decimal Shortfall { get; set; }
+        public int DeleteAfterDays { get; set; }
     }
 
     /// <summary>One automatic re-replication attempt (§6: replace a Store that failed proofs).</summary>

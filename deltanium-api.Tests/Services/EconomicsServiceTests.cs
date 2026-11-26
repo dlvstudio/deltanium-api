@@ -408,6 +408,109 @@ namespace deltanium_api.Tests.Services
             (await _wallet.GetBalanceAsync(EconAccounts.Escrow("f2"))).Should().Be(0m);
         }
 
+        private Task MonthlyPricing() => Build(enforceFees: true, new()
+        {
+            ["Economics:FreeTier:StorageBytes"] = "0",
+            ["Economics:FreeTier:SocialMonthlyBytes"] = "0",
+            ["Economics:Storage:MinContractFee"] = "0.1",
+            ["Economics:Storage:PricePerGbMonth"] = "200",
+            ["Economics:Storage:ConvertPrepaidBefore"] = "2100-01-01",
+        });
+
+        [Fact]
+        public async Task Old_prepaid_contract_switches_to_monthly_billing_unless_deleted()
+        {
+            await MonthlyPricing();
+            await Fund(Alice, 100m);
+            const long image = 2_086_124;
+            var kept = await _econ.OpenStorageEscrowAsync(Alice, "old-kept", image, new[] { "sa", "sb" }, 12, "TimeFixed", Blocks());
+            var gone = await _econ.OpenStorageEscrowAsync(Alice, "old-gone", image, new[] { "sa", "sb" }, 12, "TimeFixed", Blocks());
+            kept.Ok.Should().BeTrue(); gone.Ok.Should().BeTrue();
+            (await _econ.StopRenewalAsync(Alice, new[] { "old-gone" })).Should().Be(1); // deleted by the owner
+            var balance = await _wallet.GetBalanceAsync(Alice);
+
+            var end = kept.Escrow!.StartAt.AddMonths(12).AddMinutes(1);
+            await _econ.SettleDueAsync(end);
+
+            var k = (await _econ.GetEscrowAsync("old-kept"))!;
+            k.Status.Should().Be("Active");
+            k.ContractType.Should().Be("AutoRenew");
+            k.ConvertedToMonthly.Should().BeTrue();
+            k.Months.Should().Be(13);
+            k.RenewalFee.Should().Be(0.7771m);         // today's monthly price, not the prepaid rate
+            var g = (await _econ.GetEscrowAsync("old-gone"))!;
+            g.Status.Should().Be("Closed");
+            g.EndedAt.Should().Be(end);
+            (await _wallet.GetBalanceAsync(Alice)).Should().Be(balance - 0.7771m);
+        }
+
+        [Fact]
+        public async Task Wallet_warning_shows_grace_and_due_renewals_with_the_exact_shortfall()
+        {
+            await MonthlyPricing();
+            await Fund(Alice, 0.9m);
+            const long image = 2_086_124;
+            var a = await _econ.OpenStorageEscrowAsync(Alice, "a", image, new[] { "sa", "sb" }, 1, "AutoRenew", Blocks());
+            a.Ok.Should().BeTrue();                    // 0.9 − 0.7771 = 0.1229 left
+            var start = a.Escrow!.StartAt;
+
+            var soon = await _econ.GetRenewalStatusAsync(Alice, start.AddDays(25));
+            soon.DueCount.Should().Be(1);
+            soon.DueFee.Should().Be(0.7771m);
+            soon.Shortfall.Should().Be(0.7771m - 0.1229m);
+            (await _econ.GetRenewalStatusAsync(Alice, start.AddDays(10))).DueCount.Should().Be(0);
+
+            await _econ.SettleDueAsync(start.AddMonths(1).AddMinutes(1));
+            var grace = await _econ.GetRenewalStatusAsync(Alice, start.AddMonths(1).AddMinutes(2));
+            grace.GraceCount.Should().Be(1);
+            grace.GraceFee.Should().Be(0.7771m);
+            grace.GraceUntil.Should().Be(start.AddMonths(1).AddMinutes(1).AddDays(30));
+            grace.Shortfall.Should().Be(0.6542m);
+        }
+
+        [Fact]
+        public async Task Stores_get_expired_items_to_delete_only_after_the_waiting_days()
+        {
+            await MonthlyPricing();
+            await Fund(Alice, 0.5m);                   // one copy: 0.3886 D a month, so the first renewal fails
+            var a = await _econ.OpenStorageEscrowAsync(Alice, "a", 2_086_124, new[] { "sa" }, 1, "AutoRenew", Blocks(), replicas: 1);
+            a.Ok.Should().BeTrue();
+            var start = a.Escrow!.StartAt;
+            await _econ.SettleDueAsync(start.AddMonths(1).AddMinutes(1));       // renewal fails: grace
+            var expiredAt = start.AddMonths(1).AddDays(31);
+            await _econ.SettleDueAsync(expiredAt);
+            (await _econ.GetEscrowAsync("a"))!.Status.Should().Be("Expired");
+
+            (await _econ.EndedForNodeAsync("sa", expiredAt.AddDays(6))).Should().BeEmpty();
+            var due = await _econ.EndedForNodeAsync("sa", expiredAt.AddDays(7));
+            due.Select(e => e.Id).Should().Equal("a");
+            due[0].Blocks.Select(b => b.BlockId).Should().Equal("b0");
+            (await _econ.EndedForNodeAsync("sb", expiredAt.AddDays(7))).Should().BeEmpty(); // not held there
+            _storage.Verify(s => s.DeactivateStoredFileAsync("a"), Times.Once);
+        }
+
+        [Fact]
+        public async Task Reactions_on_an_ended_post_stop_renewing_when_its_Store_reports_them()
+        {
+            await MonthlyPricing();
+            await Fund(Alice, 10m);
+            await Fund(Bob, 10m);
+            var post = await _econ.OpenStorageEscrowAsync(Alice, "post", 2_108, new[] { "sa" }, 1, "AutoRenew", Blocks());
+            var like = await _econ.OpenStorageEscrowAsync(Bob, "like", 500, new[] { "sa" }, 1, "AutoRenew", Blocks());
+            var elsewhere = await _econ.OpenStorageEscrowAsync(Bob, "like2", 500, new[] { "sb" }, 1, "AutoRenew", Blocks());
+            var now = post.Escrow!.StartAt.AddDays(1);
+
+            (await _econ.StopRenewalOfChildrenAsync("sa", "post", new[] { "like" }, now)).Should().Be(0); // post still active
+            await _econ.StopRenewalAsync(Alice, new[] { "post" });
+            await _econ.SettleDueAsync(post.Escrow.StartAt.AddMonths(1).AddMinutes(1));
+            var ended = (await _econ.GetEscrowAsync("post"))!.EndedAt!.Value;
+
+            (await _econ.StopRenewalOfChildrenAsync("sa", "post", new[] { "like", "like2" }, ended.AddDays(1))).Should().Be(0);
+            (await _econ.StopRenewalOfChildrenAsync("sa", "post", new[] { "like", "like2" }, ended.AddDays(7))).Should().Be(1);
+            (await _econ.GetEscrowAsync("like"))!.RenewalStopped.Should().BeTrue();
+            (await _econ.GetEscrowAsync("like2"))!.RenewalStopped.Should().BeFalse(); // held by another Store
+        }
+
         [Fact]
         public async Task AutoRenew_charges_owner_then_enters_grace_and_expires()
         {

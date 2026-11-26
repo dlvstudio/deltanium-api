@@ -270,8 +270,9 @@ namespace DeltaniumApi.Services
         }
 
         /// <summary>
-        /// The owner deleted these items: their AutoRenew contracts end after the months already paid (no further
-        /// charge). Items of other owners and fixed-term contracts are skipped. Returns how many were stopped.
+        /// The owner deleted these items: their contracts end after the months already paid (no further charge, and
+        /// an old prepaid contract is not switched to monthly billing). Items of other owners are skipped.
+        /// Returns how many were stopped.
         /// </summary>
         public async Task<int> StopRenewalAsync(string owner, IEnumerable<string> fileIds)
         {
@@ -279,9 +280,100 @@ namespace DeltaniumApi.Services
             foreach (var id in fileIds.Where(i => !string.IsNullOrWhiteSpace(i)).Distinct().Take(200))
             {
                 var e = await GetEscrowAsync(id);
-                if (e == null || !SameKey(e.OwnerPublicKey, owner) || e.ContractType != "AutoRenew") continue;
+                if (e == null || !SameKey(e.OwnerPublicKey, owner) || e.RenewalStopped) continue;
+                e.RenewalStopped = true; // also keeps an old prepaid contract from switching to monthly billing
                 e.ContractType = "TimeFixed";
-                if (e.Status == "Grace") { e.Status = "Closed"; await RefundRemainderAsync(e, "Deleted by owner"); }
+                if (e.Status == "Grace") { End(e, "Closed", DateTime.UtcNow); await RefundRemainderAsync(e, "Deleted by owner"); }
+                await _docs.PutAsync(CEscrow, e.Id, e);
+                stopped++;
+            }
+            return stopped;
+        }
+
+        /// <summary>Days a Store keeps an Expired or Closed item before deleting it (a last chance to notice).</summary>
+        public int StoreDeleteAfterDays => (int)Math.Max(0m, Dec("Economics:Storage:StoreDeleteAfterDays", 7m));
+
+        /// <summary>How far back <see cref="EndedForNodeAsync"/> looks, so a Store that was offline still catches up.</summary>
+        public const int EndedLookbackDays = 60;
+
+        private static decimal NextFee(StorageEscrow e) => e.RenewalFee > 0 ? e.RenewalFee : e.MonthlyFee;
+
+        /// <summary>
+        /// What the owner's wallet must cover to keep their items: items in grace (renewal failed, deleted at
+        /// <c>GraceUntil</c> + StoreDeleteAfterDays) and renewals due within <paramref name="withinDays"/>.
+        /// Fees are the exact amounts renewal takes.
+        /// </summary>
+        public async Task<RenewalStatus> GetRenewalStatusAsync(string owner, DateTime? nowUtc = null, int withinDays = 7)
+        {
+            var now = nowUtc ?? DateTime.UtcNow;
+            var mine = await _docs.ListAsync<StorageEscrow>(CEscrow,
+                e => (e.Status == "Active" || e.Status == "Grace") && SameKey(e.OwnerPublicKey, owner));
+            var status = new RenewalStatus { Balance = await _wallet.GetBalanceAsync(owner), DeleteAfterDays = StoreDeleteAfterDays };
+            foreach (var e in mine)
+            {
+                if (e.RenewalStopped || (_wallet.EnforceFees && e.TotalFunded == 0 && !e.ConvertedToMonthly && e.ContractType == "AutoRenew"))
+                    continue; // deleted by the owner, or unfunded (renews for nothing)
+                if (e.Status == "Grace")
+                {
+                    status.GraceCount++;
+                    status.GraceFee += NextFee(e);
+                    if (e.GraceUntil is { } g && (status.GraceUntil == null || g < status.GraceUntil)) status.GraceUntil = g;
+                    continue;
+                }
+                var due = e.StartAt.AddMonths(e.Months);
+                if (due > now.AddDays(withinDays)) continue;
+                decimal fee;
+                if (e.ContractType == "AutoRenew") fee = NextFee(e);
+                else if (CanConvertToMonthly(e))
+                {
+                    var replicas = Math.Max(1, e.TargetReplicas > 0 ? e.TargetReplicas : e.StoreNodeIds.Count);
+                    fee = RenewalFeeFor(MonthlyStorageFee(e.SizeBytes, replicas));
+                }
+                else continue;
+                if (!_wallet.EnforceFees || fee <= 0) continue;
+                status.DueCount++;
+                status.DueFee += fee;
+                if (status.FirstDue == null || due < status.FirstDue) status.FirstDue = due;
+            }
+            status.Shortfall = Math.Max(0m, status.GraceFee + status.DueFee - status.Balance);
+            return status;
+        }
+
+        /// <summary>
+        /// Items a Store may now delete: Expired or Closed at least StoreDeleteAfterDays ago (within the lookback),
+        /// held by <paramref name="nodeId"/>. Stores poll this; Central never deletes anything on a Store.
+        /// </summary>
+        public async Task<List<StorageEscrow>> EndedForNodeAsync(string nodeId, DateTime? nowUtc = null, int max = 500)
+        {
+            var now = nowUtc ?? DateTime.UtcNow;
+            var before = now.AddDays(-StoreDeleteAfterDays);
+            var after = before.AddDays(-EndedLookbackDays);
+            var ended = await _docs.ListAsync<StorageEscrow>(CEscrow,
+                e => (e.Status == "Expired" || e.Status == "Closed") && e.EndedAt != null &&
+                     e.EndedAt <= before && e.EndedAt >= after && e.StoreNodeIds.Contains(nodeId));
+            return ended.OrderBy(e => e.EndedAt).Take(max).ToList();
+        }
+
+        /// <summary>
+        /// A Store deleted an ended post and reports the reactions and comments on it: stop renewing them, so
+        /// their owners stop paying for items nobody can see. Only items the Store holds are touched, and only
+        /// when the parent really ended. They run out the month already paid, then close like any other item.
+        /// </summary>
+        public async Task<int> StopRenewalOfChildrenAsync(string nodeId, string parentFileId, IEnumerable<string> childFileIds, DateTime? nowUtc = null)
+        {
+            var now = nowUtc ?? DateTime.UtcNow;
+            var parent = await GetEscrowAsync(parentFileId);
+            if (parent == null || parent.Status is not ("Expired" or "Closed") || parent.EndedAt == null ||
+                parent.EndedAt > now.AddDays(-StoreDeleteAfterDays))
+                return 0;
+            var stopped = 0;
+            foreach (var id in childFileIds.Where(i => !string.IsNullOrWhiteSpace(i) && i != parentFileId).Distinct().Take(500))
+            {
+                var e = await GetEscrowAsync(id);
+                if (e == null || e.RenewalStopped || !e.StoreNodeIds.Contains(nodeId)) continue;
+                e.RenewalStopped = true;
+                e.ContractType = "TimeFixed";
+                if (e.Status == "Grace") { End(e, "Closed", now); await RefundRemainderAsync(e, "Parent post ended"); }
                 await _docs.PutAsync(CEscrow, e.Id, e);
                 stopped++;
             }
@@ -424,7 +516,7 @@ namespace DeltaniumApi.Services
 
             var refunded = await _wallet.GetBalanceAsync(EconAccounts.Escrow(e.Id));
             await RefundRemainderAsync(e, "Upload failed; cancelled by owner");
-            e.Status = "Closed";
+            End(e, "Closed", now);
             await _docs.PutAsync(CEscrow, e.Id, e);
             _log?.LogInformation("Escrow {FileId} cancelled after a failed upload; refunded {Refunded} D", fileId, refunded);
             return (true, 200, "", Math.Max(0, refunded));
@@ -565,15 +657,16 @@ namespace DeltaniumApi.Services
                     }
                     if (e.StoreNodeIds.Count > 0 && e.StoreNodeIds.All(id => e.FailedNodeIds.Contains(id)))
                     {
-                        e.Status = "Lost";
+                        End(e, "Lost", now);
                         await RefundRemainderAsync(e, "All replicas failed proof-of-storage");
                     }
                     else if (e.MonthsSettled >= e.Months)
                     {
+                        if (e.ContractType != "AutoRenew" && CanConvertToMonthly(e)) ConvertToMonthly(e);
                         if (e.ContractType == "AutoRenew") await TryRenewAsync(e, now);
                         else
                         {
-                            e.Status = "Closed";
+                            End(e, "Closed", now);
                             await RefundRemainderAsync(e, "Contract ended");
                         }
                     }
@@ -583,8 +676,9 @@ namespace DeltaniumApi.Services
                     await TryRenewAsync(e, now);
                     if (e.Status == "Grace" && e.GraceUntil <= now)
                     {
-                        e.Status = "Expired";
+                        End(e, "Expired", now);
                         await RefundRemainderAsync(e, "Grace period ended");
+                        await _storage.DeactivateStoredFileAsync(e.Id);
                     }
                 }
                 await _docs.PutAsync(CEscrow, e.Id, e);
@@ -635,9 +729,48 @@ namespace DeltaniumApi.Services
             }
         }
 
+        private static void End(StorageEscrow e, string status, DateTime now)
+        {
+            e.Status = status;
+            e.EndedAt = now;
+            e.GraceUntil = null;
+        }
+
+        /// <summary>
+        /// Old prepaid contracts (TimeFixed, e.g. 12 months) switch to monthly billing when the term runs out,
+        /// unless the owner deleted the item. Needs an owner to bill; reactions stored unfunded under the old
+        /// free social allowance are converted too, so from then on they are paid like everything else.
+        /// </summary>
+        private bool CanConvertToMonthly(StorageEscrow e) =>
+            ConvertPrepaidBefore is { } cutoff && e.StartAt < cutoff &&
+            !e.RenewalStopped && !string.IsNullOrWhiteSpace(e.OwnerPublicKey) && e.SizeBytes > 0;
+
+        /// <summary>
+        /// Prepaid contracts opened before this date (when monthly billing replaced prepaying 12 months) switch to
+        /// monthly billing at the end of their term. Later TimeFixed contracts were asked for as fixed terms and
+        /// simply end. Unset: none are converted.
+        /// </summary>
+        public DateTime? ConvertPrepaidBefore =>
+            DateTime.TryParse(_config["Economics:Storage:ConvertPrepaidBefore"], System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal, out var d)
+                ? d : null;
+
+        private void ConvertToMonthly(StorageEscrow e)
+        {
+            var replicas = Math.Max(1, e.TargetReplicas > 0 ? e.TargetReplicas : e.StoreNodeIds.Count);
+            e.ContractType = "AutoRenew";
+            e.ConvertedToMonthly = true;
+            // The free tier is gone (§10): from now on the owner pays, at today's price.
+            e.FreeTier = false;
+            e.PayerAccount = e.OwnerPublicKey;
+            e.RenewalFee = RenewalFeeFor(MonthlyStorageFee(e.SizeBytes, replicas));
+        }
+
         private async Task TryRenewAsync(StorageEscrow e, DateTime now)
         {
-            if (!_wallet.EnforceFees || e.TotalFunded == 0)
+            // Unfunded items (EnforceFees off, or the old free social allowance) renew for nothing, until an old
+            // contract is converted to monthly billing.
+            if (!_wallet.EnforceFees || (e.TotalFunded == 0 && !e.ConvertedToMonthly))
             {
                 e.Months++;
                 e.Status = "Active";
@@ -736,7 +869,7 @@ namespace DeltaniumApi.Services
                 }
                 if (holders == 0 && unknown == 0)
                 {
-                    e.Status = "Lost";
+                    End(e, "Lost", DateTime.UtcNow);
                     await RefundRemainderAsync(e, "Blocks deleted by a Store redeploy (operator fault)");
                     await _storage.DeactivateStoredFileAsync(e.Id);
                     lost++;

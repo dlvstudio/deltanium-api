@@ -223,6 +223,69 @@ namespace DeltaniumApi.Controllers
             return Ok(new { stopped });
         }
 
+        /// <summary>What the caller's wallet must cover to keep their stored items (owner-signed GET).</summary>
+        [HttpGet("renewals")]
+        public async Task<ActionResult> Renewals()
+        {
+            var (ok, callerPk, err) = await _auth.ValidateAsync(Request, "");
+            if (!ok) return Unauthorized(err);
+            await _wallet.EnsureReadyAsync();
+            return Ok(await _econ.GetRenewalStatusAsync(callerPk!));
+        }
+
+        private async Task<(StoreNode? Node, ActionResult? Error)> CallingNodeAsync(string body)
+        {
+            var (ok, callerPk, err) = await _auth.ValidateAsync(Request, body, requireRegisteredUser: false);
+            if (!ok) return (null, Unauthorized(err));
+            var node = (await _storageService.GetNodesAsync()).FirstOrDefault(n => PubKeysMatch(n.PublicKey ?? "", callerPk!));
+            return node == null ? (null, StatusCode(403, "Not a registered Store")) : (node, null);
+        }
+
+        /// <summary>
+        /// Store-signed: items this Store holds whose contract ended (Expired or Closed) long enough ago to delete,
+        /// with their block ids. Stores poll this and delete the data themselves.
+        /// </summary>
+        [HttpPost("ended-for-node")]
+        public async Task<ActionResult> EndedForNode()
+        {
+            Request.EnableBuffering();
+            using var reader = new StreamReader(Request.Body);
+            var body = await reader.ReadToEndAsync();
+            Request.Body.Position = 0;
+            var (node, error) = await CallingNodeAsync(body);
+            if (node == null) return error!;
+            await _wallet.EnsureReadyAsync();
+            var ended = await _econ.EndedForNodeAsync(node.Id);
+            return Ok(new
+            {
+                deleteAfterDays = _econ.StoreDeleteAfterDays,
+                items = ended.Select(e => new { fileId = e.Id, e.Status, e.EndedAt, blockIds = e.Blocks.Select(b => b.BlockId).ToList() })
+            });
+        }
+
+        public class ChildrenEndedRequest
+        {
+            public string ParentFileId { get; set; } = "";
+            public List<string> FileIds { get; set; } = new();
+        }
+
+        /// <summary>Store-signed: the Store deleted an ended post; stop renewing the reactions and comments on it.</summary>
+        [HttpPost("children-ended")]
+        public async Task<ActionResult> ChildrenEnded()
+        {
+            Request.EnableBuffering();
+            using var reader = new StreamReader(Request.Body);
+            var body = await reader.ReadToEndAsync();
+            Request.Body.Position = 0;
+            var (node, error) = await CallingNodeAsync(body);
+            if (node == null) return error!;
+            var req = System.Text.Json.JsonSerializer.Deserialize<ChildrenEndedRequest>(body,
+                new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            if (req == null || string.IsNullOrWhiteSpace(req.ParentFileId)) return BadRequest("parentFileId required");
+            await _wallet.EnsureReadyAsync();
+            return Ok(new { stopped = await _econ.StopRenewalOfChildrenAsync(node.Id, req.ParentFileId, req.FileIds) });
+        }
+
         [HttpPost("cancel-escrow")]
         public async Task<ActionResult> CancelEscrow()
         {
@@ -285,6 +348,9 @@ namespace DeltaniumApi.Controllers
                 e.FreeTier,
                 e.StartAt,
                 e.GraceUntil,
+                e.EndedAt,
+                e.RenewalStopped,
+                e.RenewalFee,
                 e.StoreNodeIds,
                 e.FailedNodeIds,
                 e.Social,
