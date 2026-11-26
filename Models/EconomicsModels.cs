@@ -80,6 +80,10 @@ namespace DeltaniumApi.Models
         public bool RenewalStopped { get; set; }
         /// <summary>An old prepaid (TimeFixed) contract switched to monthly billing when its term ran out.</summary>
         public bool ConvertedToMonthly { get; set; }
+        /// <summary>Block ids already published on chain in a StorageTerm entry.</summary>
+        public bool TermBlocksPublished { get; set; }
+        /// <summary>The last term queued for the chain (status|paidUntil|deleteAfter|blocks), to queue only changes.</summary>
+        public string? LastTermKey { get; set; }
         public List<string> FailedNodeIds { get; set; } = new();
         /// <summary>
         /// Stores that have returned a registered block with the right hash at least once. The block hashes come

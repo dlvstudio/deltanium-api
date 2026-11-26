@@ -512,6 +512,59 @@ namespace deltanium_api.Tests.Services
         }
 
         [Fact]
+        public async Task Storage_terms_are_queued_for_the_chain_on_register_renewal_and_end()
+        {
+            await MonthlyPricing();
+            await Fund(Alice, 0.9m);
+            var a = await _econ.OpenStorageEscrowAsync(Alice, "a", 2_086_124, new[] { "sa", "sb" }, 1, "AutoRenew", Blocks());
+            a.Ok.Should().BeTrue();
+            var start = a.Escrow!.StartAt;
+            long U(DateTime t) => StorageTermNetworkTx.Unix(t);
+
+            var first = await _econ.PendingTermsAsync();
+            first.Should().ContainSingle();
+            first[0].Should().Be(first[0] with { FileId = "a", Status = "active", PaidUntil = U(start.AddMonths(1)),
+                DeleteAfter = U(start.AddMonths(1).AddDays(30 + 7)) });
+            first[0].Blocks.Should().Equal("b0");                 // block ids go on chain once
+            await _econ.MarkTermsPublishedAsync(first);
+            (await _econ.PendingTermsAsync()).Should().BeEmpty();
+
+            await _econ.SettleDueAsync(start.AddMonths(1).AddMinutes(1)); // 0.1229 D left: renewal fails
+            var grace = await _econ.PendingTermsAsync();
+            grace.Single().Status.Should().Be("grace");
+            grace.Single().Blocks.Should().BeNull();
+            grace.Single().PaidUntil.Should().Be(U(start.AddMonths(1)));
+            await _econ.MarkTermsPublishedAsync(grace);
+
+            var expiredAt = start.AddMonths(1).AddDays(31);
+            await _econ.SettleDueAsync(expiredAt);
+            var ended = (await _econ.PendingTermsAsync()).Single();
+            ended.Status.Should().Be("ended");
+            ended.DeleteAfter.Should().Be(U(expiredAt.AddDays(7)));
+
+            // Signed payload binds the entries: changing any byte changes the hash.
+            var terms = StorageTermNetworkTx.Serialize(new[] { ended });
+            StorageTermNetworkTx.Parse(terms).Single().Should().Be(ended);
+            StorageTermNetworkTx.SignPayload("st-1", 100, terms).Should().Be($"STORAGETERM|st-1|100|{StorageTermNetworkTx.Hash(terms)}");
+        }
+
+        [Fact]
+        public async Task Deleted_items_are_published_as_stopped_and_existing_escrows_are_backfilled_once()
+        {
+            await MonthlyPricing();
+            await Fund(Alice, 10m);
+            var a = await _econ.OpenStorageEscrowAsync(Alice, "a", 2_108, new[] { "sa" }, 1, "AutoRenew", Blocks());
+            await _econ.MarkTermsPublishedAsync(await _econ.PendingTermsAsync());
+            await _econ.StopRenewalAsync(Alice, new[] { "a" });
+            var stopped = (await _econ.PendingTermsAsync()).Single();
+            stopped.Status.Should().Be("stopped");
+            stopped.DeleteAfter.Should().Be(StorageTermNetworkTx.Unix(a.Escrow!.StartAt.AddMonths(1).AddDays(7)));
+
+            (await _econ.QueueAllTermsOnceAsync()).Should().Be(1);
+            (await _econ.QueueAllTermsOnceAsync()).Should().Be(0);
+        }
+
+        [Fact]
         public async Task AutoRenew_charges_owner_then_enters_grace_and_expires()
         {
             await Fund(Alice, 2_000m);

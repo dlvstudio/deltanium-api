@@ -284,10 +284,123 @@ namespace DeltaniumApi.Services
                 e.RenewalStopped = true; // also keeps an old prepaid contract from switching to monthly billing
                 e.ContractType = "TimeFixed";
                 if (e.Status == "Grace") { End(e, "Closed", DateTime.UtcNow); await RefundRemainderAsync(e, "Deleted by owner"); }
-                await _docs.PutAsync(CEscrow, e.Id, e);
+                await SaveEscrowAsync(e);
                 stopped++;
             }
             return stopped;
+        }
+
+        // ---------------- on-chain storage terms (StorageTerm txs) ----------------
+
+        private const string CTermQ = "termq";
+
+        public class TermQueueItem
+        {
+            public string Id { get; set; } = "";
+            public DateTime At { get; set; } = DateTime.UtcNow;
+        }
+
+        /// <summary>Saves the escrow and, when what a Store must know changed, queues it for the next StorageTerm tx.</summary>
+        private async Task SaveEscrowAsync(StorageEscrow e)
+        {
+            var key = TermKey(e);
+            if (e.LastTermKey != key)
+            {
+                e.LastTermKey = key;
+                await _docs.PutAsync(CTermQ, e.Id, new TermQueueItem { Id = e.Id });
+            }
+            await _docs.PutAsync(CEscrow, e.Id, e);
+        }
+
+        private string TermKey(StorageEscrow e)
+        {
+            var t = TermFor(e, includeBlocks: false);
+            return $"{t.Status}|{t.PaidUntil}|{t.DeleteAfter}|{e.Blocks.Count}";
+        }
+
+        /// <summary>
+        /// What the chain says about an item: paid until when, and from when a Store may delete it.
+        /// Paid (or free) items: paidUntil + grace + StoreDeleteAfterDays, so a missed renewal still gets the full
+        /// grace. Deleted by the owner: paidUntil + StoreDeleteAfterDays. Ended: EndedAt + StoreDeleteAfterDays.
+        /// </summary>
+        public StorageTermNetworkTx.Entry TermFor(StorageEscrow e, bool includeBlocks)
+        {
+            var paidUntil = e.StartAt.AddMonths(Math.Max(e.Months, 0));
+            var keep = TimeSpan.FromDays(StoreDeleteAfterDays);
+            string status;
+            DateTime deleteAfter;
+            if (e.Status is "Expired" or "Closed" or "Lost")
+            {
+                status = "ended";
+                deleteAfter = (e.EndedAt ?? DateTime.UtcNow) + keep;
+                if (e.Status == "Closed" && e.EndedAt != null && e.EndedAt < paidUntil) paidUntil = e.EndedAt.Value;
+            }
+            else if (e.RenewalStopped || (e.ContractType != "AutoRenew" && !CanConvertToMonthly(e)))
+            {
+                status = "stopped";
+                deleteAfter = paidUntil + keep;
+            }
+            else if (e.Status == "Grace")
+            {
+                status = "grace";
+                var graceEnd = e.GraceUntil ?? paidUntil.AddDays(GraceDays);
+                deleteAfter = (graceEnd > paidUntil.AddDays(GraceDays) ? graceEnd : paidUntil.AddDays(GraceDays)) + keep;
+            }
+            else
+            {
+                status = "active";
+                deleteAfter = paidUntil.AddDays(GraceDays) + keep;
+            }
+            return new StorageTermNetworkTx.Entry(e.Id, status, StorageTermNetworkTx.Unix(paidUntil), StorageTermNetworkTx.Unix(deleteAfter),
+                includeBlocks && e.Blocks.Count > 0 ? e.Blocks.Select(b => b.BlockId).ToList() : null);
+        }
+
+        /// <summary>Queued items for the next StorageTerm tx (oldest first), with their entries.</summary>
+        public async Task<List<StorageTermNetworkTx.Entry>> PendingTermsAsync(int max = StorageTermNetworkTx.MaxEntries)
+        {
+            var queued = (await _docs.ListAsync<TermQueueItem>(CTermQ)).OrderBy(q => q.At).Take(max).ToList();
+            var entries = new List<StorageTermNetworkTx.Entry>();
+            foreach (var q in queued)
+            {
+                var e = await GetEscrowAsync(q.Id);
+                if (e == null) { await _docs.DeleteAsync(CTermQ, q.Id); continue; }
+                // Block ids go on chain once, so a Store knows which blocks belong to the item.
+                entries.Add(TermFor(e, includeBlocks: !e.TermBlocksPublished));
+            }
+            return entries;
+        }
+
+        /// <summary>The tx carrying these entries was accepted by a Blocker: clear them from the queue.</summary>
+        public async Task MarkTermsPublishedAsync(IEnumerable<StorageTermNetworkTx.Entry> entries)
+        {
+            foreach (var t in entries)
+            {
+                var e = await GetEscrowAsync(t.FileId);
+                if (e != null && t.Blocks != null && !e.TermBlocksPublished)
+                {
+                    e.TermBlocksPublished = true;
+                    await _docs.PutAsync(CEscrow, e.Id, e);
+                }
+                // Re-queued meanwhile with a newer term? Its key differs from what was sent: keep it queued.
+                if (e == null || TermFor(e, false) with { Blocks = null } == t with { Blocks = null })
+                    await _docs.DeleteAsync(CTermQ, t.FileId);
+            }
+        }
+
+        /// <summary>Once: queue every escrow, so the chain holds a term for items stored before StorageTerm existed.</summary>
+        public async Task<int> QueueAllTermsOnceAsync()
+        {
+            const string marker = "storage-terms-backfill-v1";
+            if (await _docs.GetAsync<OpsMarker>(COps, marker) != null) return 0;
+            var all = await _docs.ListAsync<StorageEscrow>(CEscrow);
+            foreach (var e in all)
+            {
+                e.LastTermKey = TermKey(e);
+                await _docs.PutAsync(CEscrow, e.Id, e);
+                await _docs.PutAsync(CTermQ, e.Id, new TermQueueItem { Id = e.Id, At = e.StartAt });
+            }
+            await _docs.PutAsync(COps, marker, new OpsMarker { Id = marker, DoneAt = DateTime.UtcNow, Summary = $"{all.Count} escrows queued" });
+            return all.Count;
         }
 
         /// <summary>Days a Store keeps an Expired or Closed item before deleting it (a last chance to notice).</summary>
@@ -374,7 +487,7 @@ namespace DeltaniumApi.Services
                 e.RenewalStopped = true;
                 e.ContractType = "TimeFixed";
                 if (e.Status == "Grace") { End(e, "Closed", now); await RefundRemainderAsync(e, "Parent post ended"); }
-                await _docs.PutAsync(CEscrow, e.Id, e);
+                await SaveEscrowAsync(e);
                 stopped++;
             }
             return stopped;
@@ -404,7 +517,7 @@ namespace DeltaniumApi.Services
                 if (existing.Blocks.Count == 0 && blocks is { Count: > 0 }) existing.Blocks = blocks.ToList();
                 if (missing.Count == 0)
                 {
-                    await _docs.PutAsync(CEscrow, fileId, existing);
+                    await SaveEscrowAsync(existing);
                     return (true, 200, "", existing, null);
                 }
                 return (false, 409, "Escrow already open for this file; register new replicas under a new fileId", existing, null);
@@ -454,7 +567,7 @@ namespace DeltaniumApi.Services
                         escrow.FreeTier = true;
                         escrow.Social = social;
                         escrow.PayerAccount = "";
-                        await _docs.PutAsync(CEscrow, fileId, escrow);
+                        await SaveEscrowAsync(escrow);
                         return (true, 200, "", escrow, quote);
                     }
                 }
@@ -462,7 +575,7 @@ namespace DeltaniumApi.Services
                 {
                     escrow.PayerAccount = "";
                     escrow.Social = true;
-                    await _docs.PutAsync(CEscrow, fileId, escrow);
+                    await SaveEscrowAsync(escrow);
                     return (true, 200, "", escrow, quote);
                 }
                 if (!funded)
@@ -484,7 +597,7 @@ namespace DeltaniumApi.Services
                 escrow.Social = social;
             }
 
-            await _docs.PutAsync(CEscrow, fileId, escrow);
+            await SaveEscrowAsync(escrow);
             return (true, 200, "", escrow, quote);
         }
 
@@ -517,7 +630,7 @@ namespace DeltaniumApi.Services
             var refunded = await _wallet.GetBalanceAsync(EconAccounts.Escrow(e.Id));
             await RefundRemainderAsync(e, "Upload failed; cancelled by owner");
             End(e, "Closed", now);
-            await _docs.PutAsync(CEscrow, e.Id, e);
+            await SaveEscrowAsync(e);
             _log?.LogInformation("Escrow {FileId} cancelled after a failed upload; refunded {Refunded} D", fileId, refunded);
             return (true, 200, "", Math.Max(0, refunded));
         }
@@ -597,7 +710,7 @@ namespace DeltaniumApi.Services
             if (ok && !e.VerifiedNodeIds.Contains(nodeId))
             {
                 e.VerifiedNodeIds.Add(nodeId);
-                await _docs.PutAsync(CEscrow, e.Id, e);
+                await SaveEscrowAsync(e);
             }
         }
 
@@ -681,7 +794,7 @@ namespace DeltaniumApi.Services
                         await _storage.DeactivateStoredFileAsync(e.Id);
                     }
                 }
-                await _docs.PutAsync(CEscrow, e.Id, e);
+                await SaveEscrowAsync(e);
             }
             return settledMonths;
         }
@@ -879,7 +992,7 @@ namespace DeltaniumApi.Services
                     try { await RepairEscrowAsync(e, nodes); }
                     catch (Exception ex) { _log?.LogWarning("Repair {FileId} after data loss failed: {Err}", e.Id, ex.Message); }
                 }
-                await _docs.PutAsync(CEscrow, e.Id, e);
+                await SaveEscrowAsync(e);
                 _log?.LogWarning("Data-loss reconcile {FileId}: lost on {Lost}, holders {Holders}, status {Status}",
                     e.Id, string.Join(",", lostOn), holders, e.Status);
             }
@@ -903,7 +1016,7 @@ namespace DeltaniumApi.Services
             foreach (var e in escrows)
             {
                 var n = await RepairEscrowAsync(e, nodes);
-                if (n > 0) { added += n; await _docs.PutAsync(CEscrow, e.Id, e); }
+                if (n > 0) { added += n; await SaveEscrowAsync(e); }
             }
             return added;
         }
@@ -1162,7 +1275,7 @@ namespace DeltaniumApi.Services
                 if (cap != null && cap.MaxDPerMonth > 0 && spent.ChargedD + cost > cap.MaxDPerMonth)
                 {
                     e.EgressCapped = true;
-                    await _docs.PutAsync(CEscrow, e.Id, e);
+                    await SaveEscrowAsync(e);
                 }
                 else if (cost > 0)
                 {

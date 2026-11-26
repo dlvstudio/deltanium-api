@@ -102,6 +102,7 @@ builder.Services.ConfigureHttpClientDefaults(b => b.AddHttpMessageHandler<Deltan
 builder.Services.AddHttpClient("blocker-tx", c => c.Timeout = TimeSpan.FromSeconds(15));
 builder.Services.AddHttpClient("explorer", c => c.Timeout = TimeSpan.FromSeconds(20));
 builder.Services.AddScoped<IBlockerTxSubmitter, BlockerTxSubmitter>();
+builder.Services.AddScoped<StorageTermPublisher>();
 builder.Services.AddScoped<IChainExplorerClient, ChainExplorerClient>();
 builder.Services.AddScoped<INodeHealthService, NodeHealthService>();
 

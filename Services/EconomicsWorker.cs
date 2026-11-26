@@ -60,6 +60,9 @@ namespace DeltaniumApi.Services
                     var bonds = await econ.ProcessBondWithdrawalsAsync();
                     var repaired = await econ.RepairReplicasAsync();
                     if (repaired > 0) _log.LogInformation("Economics: {Count} replicas re-created", repaired);
+                    // Storage terms go on chain so Stores know from the chain alone what they may delete.
+                    if (!string.Equals(_config["Economics:StorageTerms:Publish"], "false", StringComparison.OrdinalIgnoreCase))
+                        await scope.ServiceProvider.GetRequiredService<StorageTermPublisher>().PublishPendingAsync();
                     _log.LogInformation("Economics tick: egress items={Egress}, months settled={Settled}, bond withdrawals={Bonds}", egress, settled, bonds);
                 }
                 catch (Exception ex)
