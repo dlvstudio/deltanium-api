@@ -221,6 +221,44 @@ namespace deltanium_api.Tests.Services
         }
 
         [Fact]
+        public async Task Monthly_billing_charges_the_opening_month_then_the_storage_used_and_stops_on_delete()
+        {
+            await Build(enforceFees: true, new()
+            {
+                ["Economics:FreeTier:StorageBytes"] = "0",
+                ["Economics:FreeTier:SocialMonthlyBytes"] = "0",
+                ["Economics:Storage:MinContractFee"] = "0.1",
+                ["Economics:Storage:PricePerGbMonth"] = "200",
+            });
+            await Fund(Alice, 100m);
+            const long image = 2_086_124, post = 2_108;
+
+            var ci = await _econ.QuoteChargeAsync(Alice, image, 2, 0, 1, social: false);
+            var cp = await _econ.QuoteChargeAsync(Alice, post, 1, 2, 1, social: false);
+            ci.OwnerPays.Should().Be(0.7771m);         // 2,086,124 B × 2 copies × 200 D/GB, one month
+            ci.Quote.RenewalFee.Should().Be(0.7771m);
+            cp.OwnerPays.Should().Be(0.1m);            // the minimum, first month only
+            cp.Quote.RenewalFee.Should().Be(0.0008m);  // then the storage actually used
+
+            var ri = await _econ.OpenStorageEscrowAsync(Alice, "img", image, new[] { "sa", "sb" }, 1, "AutoRenew", Blocks());
+            var rp = await _econ.OpenStorageEscrowAsync(Alice, "post", post, new[] { "sa" }, 1, "AutoRenew", Blocks(), replicas: 2);
+            ri.Ok.Should().BeTrue(); rp.Ok.Should().BeTrue();
+            (await _wallet.GetBalanceAsync(Alice)).Should().Be(100m - 0.7771m - 0.1m);
+
+            await _econ.SettleDueAsync(ri.Escrow!.StartAt.AddMonths(1).AddMinutes(1));
+            (await _wallet.GetBalanceAsync(Alice)).Should().Be(100m - 0.7771m - 0.1m - 0.7771m - 0.0008m);
+
+            (await _econ.StopRenewalAsync(Alice, new[] { "img", "post", "not-mine" })).Should().Be(2);
+            (await _econ.StopRenewalAsync(Bob, new[] { "img" })).Should().Be(0);
+            await _econ.SettleDueAsync(ri.Escrow.StartAt.AddMonths(2).AddMinutes(2));
+            var ledger = await _wallet.GetLedgerAsync(Alice, 50);
+            ledger.Count(l => l.Kind == "escrow:renew").Should().Be(2); // no renewal after delete
+            (await _econ.GetEscrowAsync("img"))!.Status.Should().Be("Closed");
+            // The post paid for 2 copies but one Store held it: the unreleased half comes back when it closes.
+            ledger.Where(l => l.Kind == "escrow:refund").Sum(l => l.Amount).Should().Be(0.0504m);
+        }
+
+        [Fact]
         public async Task With_no_social_allowance_a_like_is_billed_like_any_item()
         {
             await Build(enforceFees: true, new()

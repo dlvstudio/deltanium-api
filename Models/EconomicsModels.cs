@@ -65,6 +65,8 @@ namespace DeltaniumApi.Models
         public List<string> StoreNodeIds { get; set; } = new();
         public int Months { get; set; }
         public decimal MonthlyFee { get; set; }
+        /// <summary>AutoRenew: charged each month after the first (storage actually used, without the minimum fee).</summary>
+        public decimal RenewalFee { get; set; }
         public decimal TotalFunded { get; set; }
         public decimal Released { get; set; }
         public int MonthsSettled { get; set; }
@@ -270,6 +272,8 @@ namespace DeltaniumApi.Models
         public decimal PricePerGbMonth { get; set; }
         public decimal MonthlyFee { get; set; }
         public decimal TotalFee { get; set; }
+        /// <summary>AutoRenew: what each month after the first costs (whole 0.0001 D).</summary>
+        public decimal RenewalFee { get; set; }
         public bool FreeTier { get; set; }
         public long FreeTierRemainingBytes { get; set; }
         public decimal EgressQuotaBytesPerMonth { get; set; }

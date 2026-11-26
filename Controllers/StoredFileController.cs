@@ -201,6 +201,28 @@ namespace DeltaniumApi.Controllers
         /// The upload failed after register-replicas paid for it: close the escrow and refund the payer.
         /// Owner-signed; refused once a Store holds the whole file or after the cancel window.
         /// </summary>
+        public class StopRenewalRequest { public List<string> FileIds { get; set; } = new(); }
+
+        /// <summary>The owner deleted these items: stop renewing their storage (owner-signed). Paid months run out.</summary>
+        [HttpPost("stop-renewal")]
+        public async Task<ActionResult> StopRenewal()
+        {
+            Request.EnableBuffering();
+            using var reader = new StreamReader(Request.Body);
+            var body = await reader.ReadToEndAsync();
+            Request.Body.Position = 0;
+
+            var (ok, callerPk, err) = await _auth.ValidateAsync(Request, body);
+            if (!ok) return Unauthorized(err);
+            var req = System.Text.Json.JsonSerializer.Deserialize<StopRenewalRequest>(body,
+                new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            if (req == null || req.FileIds.Count == 0) return BadRequest("fileIds required");
+
+            await _wallet.EnsureReadyAsync();
+            var stopped = await _econ.StopRenewalAsync(callerPk!, req.FileIds);
+            return Ok(new { stopped });
+        }
+
         [HttpPost("cancel-escrow")]
         public async Task<ActionResult> CancelEscrow()
         {
@@ -237,7 +259,9 @@ namespace DeltaniumApi.Controllers
             await _wallet.EnsureReadyAsync();
             var c = await _econ.QuoteChargeAsync(owner, sizeBytes, Math.Max(0, storeNodes), replicas, months,
                 string.Equals(kind, "social", StringComparison.OrdinalIgnoreCase));
-            return Ok(new { quote = c.Quote, charge = c.OwnerPays, replicas = c.Replicas, social = c.Social, enforceFees = _wallet.EnforceFees });
+            // monthly: what an AutoRenew contract then takes each month (0 when the owner does not pay).
+            var monthly = c.OwnerPays > 0 ? c.Quote.RenewalFee : 0m;
+            return Ok(new { quote = c.Quote, charge = c.OwnerPays, monthly, replicas = c.Replicas, social = c.Social, enforceFees = _wallet.EnforceFees });
         }
 
         /// <summary>Storage contract status for a file (Active | Grace | Expired | Lost | Closed).</summary>

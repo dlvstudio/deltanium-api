@@ -203,6 +203,13 @@ namespace DeltaniumApi.Services
             return Math.Round(gb * PricePerGbMonth * Math.Max(1, replicas), 10);
         }
 
+        /// <summary>
+        /// What an AutoRenew contract takes each month after the first: the storage actually used, in whole 0.0001 D
+        /// (at least 0.0001 D). The minimum contract fee is an opening fee and applies to the first payment only.
+        /// </summary>
+        public static decimal RenewalFeeFor(decimal monthly) =>
+            monthly <= 0 ? 0m : Math.Max(0.0001m, Math.Round(monthly, 4, MidpointRounding.AwayFromZero));
+
         public async Task<StorageQuote> QuoteAsync(string? owner, long sizeBytes, int replicas, int months)
         {
             months = Math.Clamp(months <= 0 ? DefaultMonths : months, 1, MaxMonths);
@@ -218,6 +225,7 @@ namespace DeltaniumApi.Services
                 PricePerGbMonth = PricePerGbMonth,
                 MonthlyFee = Math.Round(total / months, 10),
                 TotalFee = total,
+                RenewalFee = RenewalFeeFor(monthly),
                 EgressQuotaBytesPerMonth = sizeBytes * EgressQuotaMultiplier
             };
             if (!string.IsNullOrWhiteSpace(owner) && await IsFreeTierEligibleAsync(owner))
@@ -259,6 +267,25 @@ namespace DeltaniumApi.Services
             var quote = await QuoteAsync(owner, sizeBytes, target, months);
             var ownerPays = !_wallet.EnforceFees || social || quote.FreeTier ? 0m : quote.TotalFee;
             return new StorageCharge(quote, target, social, ownerPays);
+        }
+
+        /// <summary>
+        /// The owner deleted these items: their AutoRenew contracts end after the months already paid (no further
+        /// charge). Items of other owners and fixed-term contracts are skipped. Returns how many were stopped.
+        /// </summary>
+        public async Task<int> StopRenewalAsync(string owner, IEnumerable<string> fileIds)
+        {
+            var stopped = 0;
+            foreach (var id in fileIds.Where(i => !string.IsNullOrWhiteSpace(i)).Distinct().Take(200))
+            {
+                var e = await GetEscrowAsync(id);
+                if (e == null || !SameKey(e.OwnerPublicKey, owner) || e.ContractType != "AutoRenew") continue;
+                e.ContractType = "TimeFixed";
+                if (e.Status == "Grace") { e.Status = "Closed"; await RefundRemainderAsync(e, "Deleted by owner"); }
+                await _docs.PutAsync(CEscrow, e.Id, e);
+                stopped++;
+            }
+            return stopped;
         }
 
         public async Task<StorageEscrow?> GetEscrowAsync(string fileId) => await _docs.GetAsync<StorageEscrow>(CEscrow, fileId);
@@ -304,6 +331,7 @@ namespace DeltaniumApi.Services
                 StoreNodeIds = storeNodeIds.Distinct().ToList(),
                 Months = quote.Months,
                 MonthlyFee = quote.MonthlyFee,
+                RenewalFee = type == "AutoRenew" ? quote.RenewalFee : 0m,
                 StartAt = DateTime.UtcNow,
                 Blocks = blocks?.Where(b => !string.IsNullOrWhiteSpace(b.BlockId) && !string.IsNullOrWhiteSpace(b.Sha256))
                     .Select(b => new FileBlockHash { BlockId = b.BlockId, Sha256 = b.Sha256.ToLowerInvariant(), BlockIndex = b.BlockIndex }).ToList() ?? new()
@@ -617,14 +645,17 @@ namespace DeltaniumApi.Services
                 return;
             }
             var payer = e.FreeTier ? EconAccounts.NetworkFund : e.OwnerPublicKey;
+            // Renewals pay the storage actually used; the first month carried the minimum (opening) fee.
+            var fee = e.RenewalFee > 0 ? e.RenewalFee : e.MonthlyFee;
             var r = await _wallet.ApplyMovesAsync(new[]
             {
-                new LedgerMove(payer, EconAccounts.Escrow(e.Id), e.MonthlyFee, "escrow:renew", $"Auto-renew month {e.Months + 1}")
+                new LedgerMove(payer, EconAccounts.Escrow(e.Id), fee, "escrow:renew", $"Auto-renew month {e.Months + 1}")
             }, e.Id);
             if (r.Ok)
             {
                 e.Months++;
-                e.TotalFunded += e.MonthlyFee;
+                e.MonthlyFee = fee; // what the next settlement releases to the Stores
+                e.TotalFunded += fee;
                 e.Status = "Active";
                 e.GraceUntil = null;
             }
