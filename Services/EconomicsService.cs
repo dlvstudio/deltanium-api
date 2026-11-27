@@ -1820,6 +1820,15 @@ namespace DeltaniumApi.Services
             return proof;
         }
 
+        private const string LedgerRowsCursorId = "ledger-rows-cursor";
+
+        /// <summary>Last anchor window whose rows a Blocker accepted (LedgerRows txs); 0 = none yet.</summary>
+        public async Task<long> GetLedgerRowsCursorAsync() =>
+            (await _docs.GetAsync<OpsMarker>(COps, LedgerRowsCursorId)) is { } m && long.TryParse(m.Summary, out var s) ? s : 0;
+
+        public Task SetLedgerRowsCursorAsync(long seq) =>
+            _docs.PutAsync(COps, LedgerRowsCursorId, new OpsMarker { Id = LedgerRowsCursorId, DoneAt = DateTime.UtcNow, Summary = seq.ToString() });
+
         public async Task<List<LedgerAnchor>> ListAnchorsAsync(int limit = 50) =>
             (await _docs.ListAsync<LedgerAnchor>(CAnchor)).OrderByDescending(a => a.Seq).Take(Math.Clamp(limit, 1, 500)).ToList();
 

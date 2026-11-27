@@ -63,6 +63,9 @@ namespace DeltaniumApi.Services
                     // Storage terms go on chain so Stores know from the chain alone what they may delete.
                     if (!string.Equals(_config["Economics:StorageTerms:Publish"], "false", StringComparison.OrdinalIgnoreCase))
                         await scope.ServiceProvider.GetRequiredService<StorageTermPublisher>().PublishPendingAsync();
+                    // Plan phase 1: every ledger window on chain, so Blockers replay balances themselves.
+                    if (!string.Equals(_config["Economics:LedgerRows:Publish"], "false", StringComparison.OrdinalIgnoreCase))
+                        await scope.ServiceProvider.GetRequiredService<LedgerRowsPublisher>().PublishPendingAsync();
                     _log.LogInformation("Economics tick: egress items={Egress}, months settled={Settled}, bond withdrawals={Bonds}", egress, settled, bonds);
                 }
                 catch (Exception ex)

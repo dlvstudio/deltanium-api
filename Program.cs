@@ -103,6 +103,7 @@ builder.Services.AddHttpClient("blocker-tx", c => c.Timeout = TimeSpan.FromSecon
 builder.Services.AddHttpClient("explorer", c => c.Timeout = TimeSpan.FromSeconds(20));
 builder.Services.AddScoped<IBlockerTxSubmitter, BlockerTxSubmitter>();
 builder.Services.AddScoped<StorageTermPublisher>();
+builder.Services.AddScoped<LedgerRowsPublisher>();
 builder.Services.AddScoped<IChainExplorerClient, ChainExplorerClient>();
 builder.Services.AddScoped<INodeHealthService, NodeHealthService>();
 
