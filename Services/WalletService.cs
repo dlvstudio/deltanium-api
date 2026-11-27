@@ -471,24 +471,48 @@ CREATE TABLE IF NOT EXISTS topup_orders (
             var legs = moves.Select(m => m with { From = m.From == null ? null : Norm(m.From), To = Norm(m.To) }).ToList();
             if (legs.Count == 0) return (true, "");
             if (legs.Any(m => m.Amount <= 0)) return (false, "Amount must be positive");
+            // The ledger keeps 10 decimals (1e-10 D is the smallest unit, the chain's LedgerRows carry F10): round here,
+            // the way the database would, and drop legs that round to nothing instead of booking 0 D rows the chain refuses.
+            legs = legs.Select(m => m with { Amount = decimal.Round(m.Amount, 10, MidpointRounding.AwayFromZero) })
+                .Where(m => m.Amount > 0).ToList();
+            if (legs.Count == 0) return (false, "Amount is below the smallest unit (0.0000000001 D)");
 
             if (_useMySql)
             {
-                await using var tx = await _db!.Database.BeginTransactionAsync();
-                try
+                // Concurrent payments touch the same rows (every fee split credits the fund and ops accounts). Reading
+                // balances without a lock and writing them back lost updates: on testnet 90 concurrent tips left 6
+                // accounts whose balance no longer matched their ledger rows. So: make sure every row exists, lock
+                // them all with SELECT ... FOR UPDATE in key order (one order everywhere, so no lock cycles), read the
+                // balances fresh under that lock, book, commit; retry the whole thing if MySQL still picks a victim.
+                var keys = legs.SelectMany(m => new[] { m.From, m.To }).Where(k => k != null).Select(k => k!)
+                    .Distinct().OrderBy(k => k, StringComparer.Ordinal).ToList();
+                for (var attempt = 1; ; attempt++)
                 {
-                    var keys = legs.SelectMany(m => new[] { m.From, m.To }).Where(k => k != null).Distinct().ToList();
-                    var accounts = await _db.WalletAccounts.Where(a => keys.Contains(a.PublicKey)).ToDictionaryAsync(a => a.PublicKey);
-                    var err = Book(legs, accounts, a => _db.WalletAccounts.Add(a), allowNegativeFrom, refId, e => _db.WalletLedger.Add(e));
-                    if (err != null) { await tx.RollbackAsync(); return (false, err); }
-                    await _db.SaveChangesAsync();
-                    await tx.CommitAsync();
-                    return (true, "");
-                }
-                catch (Exception ex)
-                {
-                    await tx.RollbackAsync();
-                    return (false, ex.Message);
+                    DetachWalletRows();
+                    await using var tx = await _db!.Database.BeginTransactionAsync();
+                    try
+                    {
+                        var marks = string.Join(",", keys.Select((_, i) => "{" + i + "}"));
+                        var args = keys.Cast<object>().ToArray();
+                        await _db.Database.ExecuteSqlRawAsync(
+                            "INSERT IGNORE INTO wallet_accounts (PublicKey, Balance, UpdatedAt) VALUES " +
+                            string.Join(",", keys.Select((_, i) => "({" + i + "}, 0, UTC_TIMESTAMP(6))")), args);
+                        var accounts = await _db.WalletAccounts
+                            .FromSqlRaw($"SELECT * FROM wallet_accounts WHERE PublicKey IN ({marks}) ORDER BY PublicKey FOR UPDATE", args)
+                            .ToDictionaryAsync(a => a.PublicKey);
+                        var err = Book(legs, accounts, a => _db.WalletAccounts.Add(a), allowNegativeFrom, refId, e => _db.WalletLedger.Add(e));
+                        if (err != null) { await tx.RollbackAsync(); DetachWalletRows(); return (false, err); }
+                        await _db.SaveChangesAsync();
+                        await tx.CommitAsync();
+                        return (true, "");
+                    }
+                    catch (Exception ex)
+                    {
+                        await tx.RollbackAsync();
+                        DetachWalletRows();
+                        if (IsLockConflict(ex) && attempt < 5) { await Task.Delay(20 * attempt + Random.Shared.Next(30)); continue; }
+                        return (false, IsLockConflict(ex) ? "The wallet is busy; please try again" : ex.Message);
+                    }
                 }
             }
 
@@ -562,6 +586,80 @@ CREATE TABLE IF NOT EXISTS topup_orders (
         }
 
         private static string Norm(string pk) => (pk ?? "").Trim();
+
+        public async Task<List<(string Account, decimal Was, decimal Now)>> RepairBalancesFromLedgerAsync()
+        {
+            static Dictionary<string, decimal> Replay(IEnumerable<WalletLedgerEntry> rows)
+            {
+                var b = new Dictionary<string, decimal>(StringComparer.Ordinal);
+                foreach (var e in rows)
+                {
+                    if (!string.IsNullOrEmpty(e.FromPublicKey)) b[e.FromPublicKey] = b.GetValueOrDefault(e.FromPublicKey) - e.Amount;
+                    if (!string.IsNullOrEmpty(e.ToPublicKey)) b[e.ToPublicKey] = b.GetValueOrDefault(e.ToPublicKey) + e.Amount;
+                }
+                return b;
+            }
+            static List<(string, decimal, decimal)> Fix(Dictionary<string, WalletAccount> accounts, Dictionary<string, decimal> truth,
+                Action<WalletAccount> add)
+            {
+                var changed = new List<(string, decimal, decimal)>();
+                foreach (var key in accounts.Keys.Union(truth.Keys).OrderBy(k => k, StringComparer.Ordinal))
+                {
+                    var want = truth.GetValueOrDefault(key);
+                    if (!accounts.TryGetValue(key, out var a))
+                    {
+                        if (want == 0m) continue;
+                        a = new WalletAccount { PublicKey = key, Balance = 0m };
+                        add(a);
+                    }
+                    if (a.Balance == want) continue;
+                    changed.Add((key, a.Balance, want));
+                    a.Balance = want;
+                    a.UpdatedAt = DateTime.UtcNow;
+                }
+                return changed;
+            }
+
+            if (_useMySql)
+            {
+                DetachWalletRows();
+                await using var tx = await _db!.Database.BeginTransactionAsync();
+                // Lock every account row first: every ledger write needs these locks, so no row lands mid-repair.
+                var accounts = await _db.WalletAccounts.FromSqlRaw("SELECT * FROM wallet_accounts ORDER BY PublicKey FOR UPDATE")
+                    .ToDictionaryAsync(a => a.PublicKey);
+                var truth = Replay(await _db.WalletLedger.AsNoTracking().ToListAsync());
+                var changed = Fix(accounts, truth, a => _db.WalletAccounts.Add(a));
+                await _db.SaveChangesAsync();
+                await tx.CommitAsync();
+                DetachWalletRows();
+                return changed;
+            }
+
+            await JsonGate.WaitAsync();
+            try
+            {
+                var list = ReadJson<List<WalletAccount>>("wallet_accounts.json");
+                var changed = Fix(list.ToDictionary(a => a.PublicKey), Replay(ReadJson<List<WalletLedgerEntry>>("wallet_ledger.json")), list.Add);
+                if (changed.Count > 0) WriteJson("wallet_accounts.json", list);
+                return changed;
+            }
+            finally { JsonGate.Release(); }
+        }
+
+        /// <summary>Forget wallet rows this DbContext tracks, so the next read sees the locked, current values.</summary>
+        private void DetachWalletRows()
+        {
+            foreach (var e in _db!.ChangeTracker.Entries().Where(e => e.Entity is WalletAccount or WalletLedgerEntry).ToList())
+                e.State = EntityState.Detached;
+        }
+
+        /// <summary>MySQL deadlock (1213) or lock wait timeout (1205), possibly wrapped by EF.</summary>
+        private static bool IsLockConflict(Exception ex)
+        {
+            for (var e = ex; e != null; e = e.InnerException)
+                if (e is MySqlConnector.MySqlException m && (m.Number == 1213 || m.Number == 1205)) return true;
+            return false;
+        }
 
         private T ReadJson<T>(string file) where T : new()
         {

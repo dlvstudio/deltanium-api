@@ -331,8 +331,14 @@ namespace DeltaniumApi.Controllers
             if (job is "bonds" or "all") bonds = await _econ.ProcessBondWithdrawalsAsync();
             object? repaired = null;
             if (job is "repair" or "all") repaired = await _econ.RepairReplicasAsync();
+            // Not part of "all": rewrites live balances, so it runs only when asked for by name.
+            if (job == "balances")
+            {
+                var fixedRows = await _wallet.RepairBalancesFromLedgerAsync();
+                return Ok(new { balancesRepaired = fixedRows.Select(c => new { account = c.Account, was = c.Was, now = c.Now }) });
+            }
             if (challenges == null && egress == null && settled == null && bonds == null && repaired == null)
-                return BadRequest("job: challenges | egress | settle | bonds | repair | all");
+                return BadRequest("job: challenges | egress | settle | bonds | repair | all | balances");
             return Ok(new { challenges, egressItems = egress, monthsSettled = settled, bondWithdrawals = bonds, replicasAdded = repaired });
         }
 
@@ -418,6 +424,9 @@ namespace DeltaniumApi.Controllers
                 new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
             if (req == null || string.IsNullOrWhiteSpace(req.ToPublicKey) || req.Amount <= 0)
                 return BadRequest("toPublicKey and positive amount required");
+            // A malformed recipient would be booked as an account no key can ever spend from: the D would be lost.
+            if (!_keys.ValidatePublicKey(req.ToPublicKey.Trim()))
+                return BadRequest("toPublicKey is not a valid public key");
             // §13: open P2P transfer can be switched off (tips and subscriptions keep working) if counsel advises.
             if (string.Equals(_config["Economics:P2PTransfer:Enabled"], "false", StringComparison.OrdinalIgnoreCase))
                 return StatusCode(403, "Peer-to-peer transfer is disabled; use tips or subscriptions");

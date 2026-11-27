@@ -112,6 +112,36 @@ namespace deltanium_api.Tests.Services
         }
 
         [Fact]
+        public async Task Amounts_are_booked_to_the_1e10_unit_and_dust_below_it_is_refused()
+        {
+            // A 0 D ledger row is refused by the Blockers' LedgerRows check, which would stall the chain's replay.
+            await Fund(Alice, 10);
+            var dust = await _wallet.TransferAsync(Alice, Bob, 0.00000000001m);
+            dust.Ok.Should().BeFalse();
+            dust.Error.Should().Contain("smallest unit");
+            (await _wallet.TransferAsync(Alice, Bob, 0.00000000016m)).Ok.Should().BeTrue();   // rounds to 2e-10
+            (await _wallet.GetBalanceAsync(Bob)).Should().Be(0.0000000002m);
+            (await _wallet.GetBalanceAsync(Alice)).Should().Be(9.9999999998m);
+        }
+
+        [Fact]
+        public async Task Balance_repair_sets_live_balances_back_to_the_ledger_replay()
+        {
+            await Fund(Alice, 300);
+            (await _wallet.TransferAsync(Alice, Bob, 100)).Ok.Should().BeTrue();
+            // Simulate a lost update: Bob's live balance no longer equals his ledger rows.
+            var file = Directory.GetFiles(_dir, "wallet_accounts.json", SearchOption.AllDirectories).Single();
+            File.WriteAllText(file, File.ReadAllText(file).Replace("100.0", "90.0"));
+            (await _wallet.GetBalanceAsync(Bob)).Should().Be(90m);
+
+            var changed = await _wallet.RepairBalancesFromLedgerAsync();
+            changed.Should().ContainSingle(c => c.Account == Bob && c.Was == 90m && c.Now == 100m);
+            (await _wallet.GetBalanceAsync(Bob)).Should().Be(100m);
+            (await _wallet.GetBalanceAsync(Alice)).Should().Be(200m);
+            (await _wallet.RepairBalancesFromLedgerAsync()).Should().BeEmpty();
+        }
+
+        [Fact]
         public async Task Balances_root_equals_replay_of_published_entries()
         {
             await Fund(Alice, 300);

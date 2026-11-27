@@ -33,6 +33,9 @@ namespace DeltaniumApi.Services
             IReadOnlyCollection<(string Account, decimal Weight)> serviceRecipients, string? memo);
         Task<(bool Ok, string Error)> ApplyMovesAsync(IReadOnlyCollection<LedgerMove> moves, string? refId, bool allowNegativeFrom = false);
 
+        /// <summary>Set every live balance to the replay of the whole ledger (rows are the truth); returns what changed.</summary>
+        Task<List<(string Account, decimal Was, decimal Now)>> RepairBalancesFromLedgerAsync();
+
         Task<(bool Ok, string Error, TopUpOrder? Order)> CreateTopUpOrderAsync(string buyerPublicKey, decimal fiatAmountVnd);
         Task<(bool Ok, string Error, TopUpOrder? Order)> CreateTopUpOrderAsync(string buyerPublicKey, decimal fiatAmountVnd, string channel);
         Task<TopUpOrder?> GetTopUpOrderAsync(string orderId);
