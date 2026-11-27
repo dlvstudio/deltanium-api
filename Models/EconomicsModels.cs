@@ -54,10 +54,11 @@ namespace DeltaniumApi.Models
     {
         public string Id { get; set; } = "";            // = fileId
         public string OwnerPublicKey { get; set; } = "";
-        /// <summary>Who funded the escrow: owner or the network fund (free tier).</summary>
+        /// <summary>Who funded the escrow: the owner ("" while fees are not enforced; old items: the network fund).</summary>
         public string PayerAccount { get; set; } = "";
+        /// <summary>Old items funded by the former free tier. No new ones; their owner pays from the next renewal.</summary>
         public bool FreeTier { get; set; }
-        /// <summary>Reaction, comment or chat message (§10: free; unfunded once the free quota is used up).</summary>
+        /// <summary>Reaction, comment or chat message: a label only, billed like any other item.</summary>
         public bool Social { get; set; }
         /// <summary>TimeFixed | AutoRenew</summary>
         public string ContractType { get; set; } = "TimeFixed";
@@ -288,7 +289,7 @@ namespace DeltaniumApi.Models
     }
 
     /// <summary>What registering one item costs its owner: the quote at the paid replica count, and the D taken from
-    /// the owner's wallet (0 for social items, the free tier, or while fees are not enforced).</summary>
+    /// the owner's wallet (0 only while fees are not enforced; nothing is free).</summary>
     public record StorageCharge(StorageQuote Quote, int Replicas, bool Social, decimal OwnerPays);
 
     public class StorageQuote
@@ -301,8 +302,5 @@ namespace DeltaniumApi.Models
         public decimal TotalFee { get; set; }
         /// <summary>AutoRenew: what each month after the first costs (whole 0.0001 D).</summary>
         public decimal RenewalFee { get; set; }
-        public bool FreeTier { get; set; }
-        public long FreeTierRemainingBytes { get; set; }
-        public decimal EgressQuotaBytesPerMonth { get; set; }
     }
 }

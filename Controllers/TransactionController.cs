@@ -77,7 +77,7 @@ namespace DeltaniumApi.Controllers
             if (tx.Timestamp <= 0)
                 tx.Timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
-            // TOKENOMICS_V2 §5/§10: tx fee (social actions sponsored and rate-limited, TopUp free).
+            // TOKENOMICS_V2 §5: the sender pays the tx fee (no sponsored txs; TopUp is refused here, Central issues it).
             var fee = await _econ.ChargeTxFeeAsync(tx.Type, tx.From, tx.Id);
             if (!fee.Ok) return StatusCode(fee.Status, new { error = fee.Error, fee = fee.Fee });
             tx.Fee = (long)Math.Ceiling(fee.Fee);

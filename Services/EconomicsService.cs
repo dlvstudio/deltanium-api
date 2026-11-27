@@ -18,7 +18,7 @@ namespace DeltaniumApi.Services
     /// <summary>
     /// TOKENOMICS_V2 network economics on top of the wallet ledger:
     /// storage escrow + proof-of-storage (§6), bandwidth (§7), bonds &amp; slashing (§8),
-    /// creator subscriptions &amp; tips (§9), free tier &amp; sponsored txs (§10),
+    /// creator subscriptions &amp; tips (§9), no free usage: every byte stored or served and every tx is paid (§10),
     /// ledger anchors (§11 phase A), reserve &amp; redemption (§2, §4).
     /// </summary>
     public class EconomicsService
@@ -27,11 +27,6 @@ namespace DeltaniumApi.Services
             CEgressSpend = "egressspend", CPayee = "payee", CRedemption = "redemption", CBondWd = "bondwd",
             CSlash = "slash", CPlan = "subplan", CSub = "sub", CAnchor = "anchor", CMeta = "meta",
             CAnchorBal = "anchorbal", CRepl = "repl", CReceipt = "egressrcpt";
-
-        private static readonly HashSet<string> SocialTxTypes = new(StringComparer.OrdinalIgnoreCase)
-        { "UserRegistration", "Follow", "Unfollow", "CreatePost", "React", "Comment" };
-
-        private static readonly ConcurrentDictionary<string, Queue<DateTime>> SocialRate = new();
 
         private readonly IWalletService _wallet;
         private readonly EconDocStore _docs;
@@ -65,11 +60,6 @@ namespace DeltaniumApi.Services
         public decimal MinContractFee => Dec("Economics:Storage:MinContractFee", 10m);
         public int DefaultMonths => (int)Dec("Economics:Storage:DefaultMonths", 12m);
         public int MaxMonths => (int)Dec("Economics:Storage:MaxMonths", 120m);
-        public long FreeTierStorageBytes => (long)Dec("Economics:FreeTier:StorageBytes", 200m * 1024 * 1024);
-        public long FreeTierEgressBytes => (long)Dec("Economics:FreeTier:EgressBytesPerMonth", 2m * 1024 * 1024 * 1024);
-        public bool FreeTierRequireEmail => Bool("Economics:FreeTier:RequireEmail", true);
-        public int SocialTxPerHour => (int)Dec("Economics:FreeTier:SocialTxPerHour", 120m);
-        public decimal EgressQuotaMultiplier => Dec("Economics:Bandwidth:QuotaMultiplier", 10m);
         public decimal EgressPricePerGb => Dec("Economics:Bandwidth:PricePerGb", 300m);
         public decimal MaxReportedReadsPerFile => Dec("Economics:Bandwidth:MaxReadsPerReport", 10000m);
         public decimal TxFee => Dec("Economics:TxFee", 1m);
@@ -142,60 +132,8 @@ namespace DeltaniumApi.Services
 
         // ---------------- storage quote & escrow (§6, §10) ----------------
 
-        /// <summary>
-        /// Free tier needs a verified email once Economics:FreeTier:RequireVerifiedEmail=true (needs SMTP, see
-        /// EmailVerificationService). Until then an email on the profile is enough, but each address counts once:
-        /// only the earliest account registered with it gets the free tier.
-        /// </summary>
-        public bool FreeTierRequireVerifiedEmail => Bool("Economics:FreeTier:RequireVerifiedEmail", false);
-
-        /// <summary>
-        /// Free-tier bytes the network may hold without the network fund paying for them (fund empty).
-        /// Past it new free-tier uploads are refused instead of being stored for nothing.
-        /// </summary>
-        public long FreeTierUnfundedBudgetBytes => (long)Dec("Economics:FreeTier:UnfundedBudgetBytes", 50m * 1024 * 1024 * 1024);
-
         public async Task<bool> IsEmailVerifiedAsync(string owner) =>
             !string.IsNullOrEmpty((await _docs.GetAsync<EmailVerification>(EmailVerificationService.CVerify, owner))?.VerifiedEmail);
-
-        public async Task<bool> IsFreeTierEligibleAsync(string owner)
-        {
-            var users = await _storage.GetUsersAsync();
-            var user = users.FirstOrDefault(u => SameKey(u.PublicKey, owner));
-            if (user == null) return false;
-            if (FreeTierRequireVerifiedEmail) return await IsEmailVerifiedAsync(owner);
-            if (!FreeTierRequireEmail) return true;
-            if (string.IsNullOrWhiteSpace(user.Email)) return false;
-            var email = EmailVerificationService.Normalize(user.Email);
-            var first = users.Where(u => !string.IsNullOrWhiteSpace(u.Email) && EmailVerificationService.Normalize(u.Email!) == email)
-                .OrderBy(u => u.CreatedAt).First();
-            return SameKey(first.PublicKey, owner);
-        }
-
-        public async Task<long> GetFreeTierUsedBytesAsync(string owner)
-        {
-            var escrows = await _docs.ListAsync<StorageEscrow>(CEscrow,
-                e => e.FreeTier && (e.Status == "Active" || e.Status == "Grace") && SameKey(e.OwnerPublicKey, owner));
-            return escrows.Sum(e => e.SizeBytes * Math.Max(1, e.StoreNodeIds.Count));
-        }
-
-        /// <summary>Largest item that may be registered as a free social item (reaction, comment, chat message).</summary>
-        public const long SocialItemMaxBytes = 64 * 1024;
-
-        /// <summary>
-        /// Social bytes one owner may store for free per calendar month (UTC). "Social" is declared by the App,
-        /// so without a budget any small file could be registered as a reaction and stored free forever.
-        /// Beyond it, items are billed like any other upload (free-tier quota first).
-        /// </summary>
-        public long SocialMonthlyBytes => (long)Dec("Economics:FreeTier:SocialMonthlyBytes", 20m * 1024 * 1024);
-
-        public async Task<long> GetSocialBytesThisMonthAsync(string owner, DateTime nowUtc)
-        {
-            var monthStart = new DateTime(nowUtc.Year, nowUtc.Month, 1, 0, 0, 0, DateTimeKind.Utc);
-            var items = await _docs.ListAsync<StorageEscrow>(CEscrow,
-                e => e.Social && e.StartAt >= monthStart && SameKey(e.OwnerPublicKey, owner));
-            return items.Sum(e => e.SizeBytes * Math.Max(1, e.StoreNodeIds.Count));
-        }
 
         public decimal MonthlyStorageFee(long sizeBytes, int replicas)
         {
@@ -225,30 +163,16 @@ namespace DeltaniumApi.Services
                 PricePerGbMonth = PricePerGbMonth,
                 MonthlyFee = Math.Round(total / months, 10),
                 TotalFee = total,
-                RenewalFee = RenewalFeeFor(monthly),
-                EgressQuotaBytesPerMonth = sizeBytes * EgressQuotaMultiplier
+                RenewalFee = RenewalFeeFor(monthly)
             };
-            if (!string.IsNullOrWhiteSpace(owner) && await IsFreeTierEligibleAsync(owner))
-            {
-                var used = await GetFreeTierUsedBytesAsync(owner);
-                var remaining = Math.Max(0, FreeTierStorageBytes - used);
-                quote.FreeTierRemainingBytes = remaining;
-                quote.FreeTier = sizeBytes * replicas <= remaining;
-                if (quote.FreeTier)
-                {
-                    // §10: the network fund pays nodes at normal rates for the bytes actually stored. The per-contract
-                    // minimum is an anti-dust rule for paid contracts; applied here it would cost the fund 10 D per like.
-                    quote.MonthlyFee = monthly;
-                    quote.TotalFee = Math.Round(monthly * months, 10);
-                }
-            }
             return quote;
         }
 
         /// <summary>
         /// Exactly what registering an item will take from its owner's wallet, using the same rules as
-        /// <see cref="OpenStorageEscrowAsync"/>: paid replica count, the social allowance, the free tier and
-        /// EnforceFees. Apps show <see cref="StorageCharge.OwnerPays"/> before uploading, so the fee shown is the fee charged.
+        /// <see cref="OpenStorageEscrowAsync"/>: paid replica count and EnforceFees. Nothing is free: reactions, comments
+        /// and chat messages are billed like any other item. Apps show <see cref="StorageCharge.OwnerPays"/> before
+        /// uploading, so the fee shown is the fee charged.
         /// </summary>
         public async Task<StorageCharge> QuoteChargeAsync(string? owner, long sizeBytes, int storeNodeCount, int replicas,
             int months, bool social)
@@ -258,14 +182,8 @@ namespace DeltaniumApi.Services
             var activeStores = (await _storage.GetActiveNodesAsync())?.Count ?? 0;
             var target = Math.Max(storeNodeCount, Math.Min(replicas, Math.Min(MaxReplicas, Math.Max(activeStores, 1))));
             target = Math.Max(1, target);
-            // §10: social items (reaction, comment, chat message) are free. They use the free quota while it lasts;
-            // beyond it they are recorded unfunded instead of charging the owner. Only small items qualify.
-            social = social && sizeBytes > 0 && sizeBytes <= SocialItemMaxBytes && SocialMonthlyBytes > 0;
-            if (social && !string.IsNullOrWhiteSpace(owner) &&
-                await GetSocialBytesThisMonthAsync(owner, DateTime.UtcNow) + sizeBytes * target > SocialMonthlyBytes)
-                social = false;
             var quote = await QuoteAsync(owner, sizeBytes, target, months);
-            var ownerPays = !_wallet.EnforceFees || social || quote.FreeTier ? 0m : quote.TotalFee;
+            var ownerPays = _wallet.EnforceFees ? quote.TotalFee : 0m;
             return new StorageCharge(quote, target, social, ownerPays);
         }
 
@@ -496,8 +414,8 @@ namespace DeltaniumApi.Services
         public async Task<StorageEscrow?> GetEscrowAsync(string fileId) => await _docs.GetAsync<StorageEscrow>(CEscrow, fileId);
 
         /// <summary>
-        /// Fund the storage escrow for a newly registered file (all replicas). Free-tier uploads are paid by the
-        /// network fund; otherwise the owner pays. While Economics:EnforceFees=false the escrow is recorded
+        /// Fund the storage escrow for a newly registered file (all replicas). The owner pays, always (no free tier,
+        /// no free social items: free storage is an open door for spam). While Economics:EnforceFees=false the escrow is recorded
         /// unfunded so proofs still run but nobody is charged.
         /// </summary>
         public async Task<(bool Ok, int Status, string Error, StorageEscrow? Escrow, StorageQuote? Quote)> OpenStorageEscrowAsync(
@@ -506,9 +424,6 @@ namespace DeltaniumApi.Services
         {
             var charge = await QuoteChargeAsync(owner, sizeBytes, storeNodeIds.Distinct().Count(), replicas, months, social);
             var target = charge.Replicas;
-            if (social && !charge.Social)
-                _log?.LogInformation("Social budget used up for {Owner}; {FileId} billed as a normal upload", owner, fileId);
-            social = charge.Social;
             var existing = await GetEscrowAsync(fileId);
             if (existing != null)
             {
@@ -542,59 +457,22 @@ namespace DeltaniumApi.Services
                     .Select(b => new FileBlockHash { BlockId = b.BlockId, Sha256 = b.Sha256.ToLowerInvariant(), BlockIndex = b.BlockIndex }).ToList() ?? new()
             };
             escrow.TargetReplicas = target;
+            escrow.Social = social; // a label only (reaction, comment, chat message): billed like any other item
 
             if (_wallet.EnforceFees)
             {
-                var funded = false;
-                if (quote.FreeTier)
+                var r = await _wallet.ApplyMovesAsync(new[]
                 {
-                    var r = await _wallet.ApplyMovesAsync(new[]
-                    {
-                        new LedgerMove(EconAccounts.NetworkFund, EconAccounts.Escrow(fileId), quote.TotalFee, "escrow:fund", "Free tier storage (network fund)")
-                    }, fileId);
-                    if (r.Ok) { funded = true; escrow.FreeTier = true; escrow.PayerAccount = EconAccounts.NetworkFund; }
-                    else
-                    {
-                        // The free tier is a promise to the user, not a loan: when the network fund is short the
-                        // escrow is recorded unfunded (still inside the user's quota) instead of charging the owner,
-                        // up to a network-wide budget so an empty fund cannot mean unlimited unpaid storage.
-                        var unfunded = (await _docs.ListAsync<StorageEscrow>(CEscrow, x => x.FreeTier && x.TotalFunded == 0 && (x.Status == "Active" || x.Status == "Grace")))
-                            .Sum(x => x.SizeBytes * Math.Max(1, x.StoreNodeIds.Count));
-                        // Social items have their own monthly budget and are never refused here.
-                        if (!social && unfunded + quote.SizeBytes * quote.Replicas > FreeTierUnfundedBudgetBytes)
-                            return (false, 402, "Free storage is paused until the network fund is topped up", null, quote);
-                        _log?.LogWarning("Free tier funding failed for {FileId}: {Err}; recorded unfunded", fileId, r.Error);
-                        escrow.FreeTier = true;
-                        escrow.Social = social;
-                        escrow.PayerAccount = "";
-                        await SaveEscrowAsync(escrow);
-                        return (true, 200, "", escrow, quote);
-                    }
-                }
-                if (!funded && social)
-                {
-                    escrow.PayerAccount = "";
-                    escrow.Social = true;
-                    await SaveEscrowAsync(escrow);
-                    return (true, 200, "", escrow, quote);
-                }
-                if (!funded)
-                {
-                    var r = await _wallet.ApplyMovesAsync(new[]
-                    {
-                        new LedgerMove(owner, EconAccounts.Escrow(fileId), quote.TotalFee, "escrow:fund",
-                            $"Storage {quote.SizeBytes} B × {quote.Replicas} replicas × {quote.Months} mo")
-                    }, fileId);
-                    if (!r.Ok) return (false, 402, $"Storage fee {quote.TotalFee} D not paid: {r.Error}", null, quote);
-                    escrow.PayerAccount = owner;
-                }
+                    new LedgerMove(owner, EconAccounts.Escrow(fileId), quote.TotalFee, "escrow:fund",
+                        $"Storage {quote.SizeBytes} B × {quote.Replicas} replicas × {quote.Months} mo")
+                }, fileId);
+                if (!r.Ok) return (false, 402, $"Storage fee {quote.TotalFee} D not paid: {r.Error}", null, quote);
+                escrow.PayerAccount = owner;
                 escrow.TotalFunded = quote.TotalFee;
             }
             else
             {
                 escrow.PayerAccount = "";
-                escrow.FreeTier = quote.FreeTier;
-                escrow.Social = social;
             }
 
             await SaveEscrowAsync(escrow);
@@ -890,7 +768,9 @@ namespace DeltaniumApi.Services
                 e.GraceUntil = null;
                 return;
             }
-            var payer = e.FreeTier ? EconAccounts.NetworkFund : e.OwnerPublicKey;
+            // The owner pays every renewal. Items once funded by the old free tier are billed to their owner too.
+            var payer = e.OwnerPublicKey;
+            e.FreeTier = false;
             // Renewals pay the storage actually used; the first month carried the minimum (opening) fee.
             var fee = e.RenewalFee > 0 ? e.RenewalFee : e.MonthlyFee;
             var r = await _wallet.ApplyMovesAsync(new[]
@@ -1264,8 +1144,8 @@ namespace DeltaniumApi.Services
             var usage = await _docs.GetAsync<EgressUsage>(CEgress, id) ?? new EgressUsage { Id = id, Period = period, FileId = fileId };
             usage.Bytes += bytes;
 
-            var quota = (long)(e.SizeBytes * EgressQuotaMultiplier);
-            var over = Math.Max(0, usage.Bytes - quota) - usage.ChargedBytes;
+            // Every byte served is paid by the owner (no free reads: a free allowance is an open door for spam).
+            var over = usage.Bytes - usage.ChargedBytes;
             if (over > 0)
             {
                 var cost = Math.Round(over / (1024m * 1024m * 1024m) * EgressPricePerGb, 10);
@@ -1280,7 +1160,7 @@ namespace DeltaniumApi.Services
                 else if (cost > 0)
                 {
                     var r = await _wallet.SettleFeeAsync(e.OwnerPublicKey, cost, FeeTypes.Bandwidth,
-                        new[] { (nodePublicKey, 1m) }, fileId, $"Egress over quota {over} B ({period})");
+                        new[] { (nodePublicKey, 1m) }, fileId, $"Egress {over} B ({period})");
                     if (r.Ok) { usage.ChargedD += cost; spent.ChargedD += cost; }
                     else usage.UnpaidD += cost;
                     await _docs.PutAsync(CEgressSpend, spendId, spent);
@@ -1415,42 +1295,21 @@ namespace DeltaniumApi.Services
             return result;
         }
 
-        // ---------------- transaction fees & sponsorship (§5, §10) ----------------
+        // ---------------- transaction fees (§5) ----------------
 
+        /// <summary>
+        /// Every tx submitted through Central is paid by its sender: no sponsored social actions (anyone can make
+        /// keys, so a free tx is free chain spam). TopUp txs are made by Central itself when Super Admin approves an
+        /// order and never come through this path.
+        /// </summary>
         public async Task<(bool Ok, int Status, string Error, decimal Fee, string? Payer)> ChargeTxFeeAsync(string type, string from, string txId)
         {
-            if (string.Equals(type, "TopUp", StringComparison.OrdinalIgnoreCase)) return (true, 200, "", 0, null);
-            var social = SocialTxTypes.Contains(type);
-            if (social && !TryConsumeSocialQuota(from))
-                return (false, 429, $"Free social action limit reached ({SocialTxPerHour}/hour)", 0, null);
+            if (string.Equals(type, "TopUp", StringComparison.OrdinalIgnoreCase))
+                return (false, 403, "TopUp transactions are issued by Central only", 0, null);
             if (!_wallet.EnforceFees || TxFee <= 0) return (true, 200, "", 0, null);
-
-            var payer = social ? EconAccounts.NetworkFund : from;
-            var r = await _wallet.SettleFeeAsync(payer, TxFee, FeeTypes.Tx,
-                new[] { (EconAccounts.BlockerFeePool, 1m) }, txId, $"Tx fee {type}" + (social ? " (sponsored)" : ""), force: true);
-            if (r.Ok) return (true, 200, "", TxFee, payer);
-            if (social)
-            {
-                // §10: users never need D to interact. If the sponsor fund cannot cover it, let the action
-                // through unpaid instead of blocking it (the fund refills from its fee share).
-                _log?.LogWarning("Network fund could not sponsor {Type} tx {TxId}: {Err}; accepted without fee", type, txId, r.Error);
-                return (true, 200, "", 0, null);
-            }
-            return (false, 402, $"Tx fee {TxFee} D not paid: {r.Error}", TxFee, payer);
-        }
-
-        private bool TryConsumeSocialQuota(string from)
-        {
-            if (SocialTxPerHour <= 0) return true;
-            var q = SocialRate.GetOrAdd(from, _ => new Queue<DateTime>());
-            lock (q)
-            {
-                var cutoff = DateTime.UtcNow.AddHours(-1);
-                while (q.Count > 0 && q.Peek() < cutoff) q.Dequeue();
-                if (q.Count >= SocialTxPerHour) return false;
-                q.Enqueue(DateTime.UtcNow);
-                return true;
-            }
+            var r = await _wallet.SettleFeeAsync(from, TxFee, FeeTypes.Tx,
+                new[] { (EconAccounts.BlockerFeePool, 1m) }, txId, $"Tx fee {type}", force: true);
+            return r.Ok ? (true, 200, "", TxFee, from) : (false, 402, $"Tx fee {TxFee} D not paid: {r.Error}", TxFee, from);
         }
 
         /// <summary>Pay accumulated tx fees to the blocker granted the next block slot.</summary>
@@ -1858,20 +1717,11 @@ namespace DeltaniumApi.Services
             return new
             {
                 balance = await _wallet.GetBalanceAsync(owner),
-                freeTier = new
-                {
-                    eligible = await IsFreeTierEligibleAsync(owner),
-                    emailVerified = await IsEmailVerifiedAsync(owner),
-                    requiresVerifiedEmail = FreeTierRequireVerifiedEmail,
-                    storageQuotaBytes = FreeTierStorageBytes,
-                    storageUsedBytes = active.Where(e => e.FreeTier).Sum(e => e.SizeBytes * Math.Max(1, e.StoreNodeIds.Count)),
-                    egressQuotaBytesPerMonth = FreeTierEgressBytes,
-                    socialTxPerHour = SocialTxPerHour
-                },
+                emailVerified = await IsEmailVerifiedAsync(owner),
                 storage = new
                 {
                     activeContracts = active.Count,
-                    paidBytes = active.Where(e => !e.FreeTier).Sum(e => e.SizeBytes * Math.Max(1, e.StoreNodeIds.Count)),
+                    paidBytes = active.Where(e => e.TotalFunded > 0).Sum(e => e.SizeBytes * Math.Max(1, e.StoreNodeIds.Count)),
                     inGrace = active.Count(e => e.Status == "Grace"),
                     pricePerGbMonth = PricePerGbMonth,
                     minContractFee = MinContractFee
@@ -1883,7 +1733,6 @@ namespace DeltaniumApi.Services
                     chargedD = egressCharged,
                     unpaidD = egressUnpaid,
                     pricePerGb = EgressPricePerGb,
-                    quotaMultiplier = EgressQuotaMultiplier,
                     capDPerMonth = cap?.MaxDPerMonth
                 },
                 subscriptions = await ListSubscriptionsOfAsync(owner),

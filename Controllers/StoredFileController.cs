@@ -38,7 +38,7 @@ namespace DeltaniumApi.Controllers
             public string? ContractType { get; set; }
             /// <summary>SHA-256 of every uploaded block, used for proof-of-storage challenges.</summary>
             public List<FileBlockHash>? Blocks { get; set; }
-            /// <summary>"social" for reactions, comments and chat messages (free, see EconomicsService.SocialItemMaxBytes).</summary>
+            /// <summary>"social" for reactions, comments and chat messages (a label only: billed like any other item).</summary>
             public string? Kind { get; set; }
             /// <summary>
             /// Copies to keep (paid for). May exceed the Stores uploaded to: Central copies the file to more Stores
@@ -311,7 +311,7 @@ namespace DeltaniumApi.Controllers
         /// <summary>
         /// Price an item before upload (§6) with the same rules as register-replicas: pass the same fileSize,
         /// the number of Stores it goes to (storeNodes), replicas, months and kind=social. <c>charge</c> is exactly
-        /// what registering it will take from the owner's wallet. Optional owner enables the free-tier and social checks.
+        /// what registering it will take from the owner's wallet. There is no free tier: owner is optional.
         /// </summary>
         [HttpGet("quote")]
         public async Task<ActionResult> Quote([FromQuery] long sizeBytes, [FromQuery] int replicas = 2,

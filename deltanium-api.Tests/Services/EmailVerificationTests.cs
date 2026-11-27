@@ -56,8 +56,8 @@ namespace deltanium_api.Tests.Services
         [Fact]
         public async Task Code_verifies_the_address_and_is_never_stored_in_clear()
         {
-            var (econ, verify, _) = await Build(new() { ["Economics:FreeTier:RequireVerifiedEmail"] = "true" });
-            (await econ.IsFreeTierEligibleAsync(Alice)).Should().BeFalse();
+            var (econ, verify, _) = await Build();
+            (await econ.IsEmailVerifiedAsync(Alice)).Should().BeFalse();
 
             string? code = null;
             (await verify.SendCodeAsync(Alice, "a@example.test", null, c => { code = c; return Task.CompletedTask; })).Ok.Should().BeTrue();
@@ -68,7 +68,7 @@ namespace deltanium_api.Tests.Services
             var wrong = code == "000000" ? "111111" : "000000";
             (await verify.VerifyAsync(Alice, wrong)).Status.Should().Be(400);
             (await verify.VerifyAsync(Alice, code!)).Ok.Should().BeTrue();
-            (await econ.IsFreeTierEligibleAsync(Alice)).Should().BeTrue();
+            (await econ.IsEmailVerifiedAsync(Alice)).Should().BeTrue();
         }
 
         [Fact]
@@ -107,26 +107,6 @@ namespace deltanium_api.Tests.Services
             (await verify.SendCodeAsync(Alice, "a@example.test")).Status.Should().Be(503);
         }
 
-        [Fact]
-        public async Task Without_verification_each_address_counts_once()
-        {
-            var (econ, _, _) = await Build();
-            (await econ.IsFreeTierEligibleAsync(Alice)).Should().BeTrue();
-            (await econ.IsFreeTierEligibleAsync(Mallory)).Should().BeFalse(); // same address, registered later
-            (await econ.IsFreeTierEligibleAsync(Carol)).Should().BeTrue();
-        }
-
-        [Fact]
-        public async Task Unfunded_free_tier_stops_at_the_network_budget_but_social_items_still_pass()
-        {
-            var (econ, _, wallet) = await Build(new() { ["Economics:FreeTier:UnfundedBudgetBytes"] = "3000" });
-            (await econ.OpenStorageEscrowAsync(Alice, "p1", 2000, new[] { "sa" }, 12, null, null)).Ok.Should().BeTrue();
-            var over = await econ.OpenStorageEscrowAsync(Carol, "p2", 2000, new[] { "sa" }, 12, null, null);
-            over.Ok.Should().BeFalse();
-            over.Status.Should().Be(402);
-            (await econ.OpenStorageEscrowAsync(Carol, "like", 500, new[] { "sa" }, 12, null, null, social: true)).Ok.Should().BeTrue();
-            (await wallet.GetBalanceAsync(Carol)).Should().Be(0m);
-        }
 
         [Fact]
         public void Registrations_per_ip_are_capped_per_day()

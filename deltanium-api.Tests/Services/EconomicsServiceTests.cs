@@ -151,7 +151,7 @@ namespace deltanium_api.Tests.Services
         [Fact]
         public async Task Escrow_is_paid_by_owner_and_returns_402_when_short()
         {
-            var size = 300L * 1024 * 1024; // above free tier
+            var size = 300L * 1024 * 1024;
             var r = await _econ.OpenStorageEscrowAsync(Alice, "f1", size, new[] { "sa", "sb" }, 12, null, Blocks());
             r.Ok.Should().BeFalse();
             r.Status.Should().Be(402);
@@ -164,27 +164,17 @@ namespace deltanium_api.Tests.Services
         }
 
         [Fact]
-        public async Task Free_tier_is_paid_by_network_fund_for_users_with_email()
+        public async Task Nothing_is_free_even_with_an_email_and_a_full_network_fund()
         {
             await Fund(EconAccounts.NetworkFund, 1_000m);
-            var r = await _econ.OpenStorageEscrowAsync(Alice, "free1", 1024 * 1024, new[] { "sa", "sb" }, 12, null, Blocks());
-            r.Ok.Should().BeTrue();
-            r.Escrow!.FreeTier.Should().BeTrue();
-            r.Escrow.PayerAccount.Should().Be(EconAccounts.NetworkFund);
-            (await _econ.GetFreeTierUsedBytesAsync(Alice)).Should().Be(2 * 1024 * 1024);
 
-            (await _econ.IsFreeTierEligibleAsync(Bob)).Should().BeFalse(); // no email
-        }
-
-        [Fact]
-        public async Task Free_storage_off_bills_the_owner_but_keeps_social_items_free()
-        {
-            await Build(enforceFees: true, new() { ["Economics:FreeTier:StorageBytes"] = "0" });
-            await Fund(EconAccounts.NetworkFund, 1_000m);
-
+            // Alice has an email (the old free-tier rule) and the fund could pay: she still pays, or is refused.
             var r = await _econ.OpenStorageEscrowAsync(Alice, "post1", 1024 * 1024, new[] { "sa", "sb" }, 12, null, Blocks());
             r.Ok.Should().BeFalse();
-            r.Status.Should().Be(402); // Alice has an email but an empty wallet
+            r.Status.Should().Be(402);
+            var like = await _econ.OpenStorageEscrowAsync(Alice, "like1", 600, new[] { "sa", "sb" }, 12, null, null, social: true);
+            like.Ok.Should().BeFalse();
+            like.Status.Should().Be(402);
             (await _wallet.GetBalanceAsync(EconAccounts.NetworkFund)).Should().Be(1_000m);
 
             await Fund(Alice, 100m);
@@ -192,20 +182,20 @@ namespace deltanium_api.Tests.Services
             r.Ok.Should().BeTrue();
             r.Escrow!.FreeTier.Should().BeFalse();
             r.Escrow.PayerAccount.Should().Be(Alice);
-
-            var like = await _econ.OpenStorageEscrowAsync(Alice, "like1", 600, new[] { "sa", "sb" }, 12, null, null, social: true);
+            like = await _econ.OpenStorageEscrowAsync(Alice, "like1", 600, new[] { "sa", "sb" }, 12, null, null, social: true);
             like.Ok.Should().BeTrue();
-            like.Escrow!.Social.Should().BeTrue();
-            like.Escrow.PayerAccount.Should().BeEmpty();
+            like.Escrow!.Social.Should().BeTrue(); // a label only
+            like.Escrow.PayerAccount.Should().Be(Alice);
+            like.Escrow.TotalFunded.Should().Be(_econ.MinContractFee);
         }
 
         [Theory]
         [InlineData(2_108L, 1, 2, false)]          // small post: the minimum contract fee
         [InlineData(2_086_124L, 2, 0, false)]      // 2 MB image on two Stores
-        [InlineData(600L, 1, 2, true)]             // reaction: free
+        [InlineData(600L, 1, 2, true)]             // reaction: billed like any item
         public async Task Quoted_charge_is_exactly_what_registering_takes(long size, int stores, int replicas, bool social)
         {
-            await Build(enforceFees: true, new() { ["Economics:FreeTier:StorageBytes"] = "0", ["Economics:Storage:MinContractFee"] = "1" });
+            await Build(enforceFees: true, new() { ["Economics:Storage:MinContractFee"] = "1" });
             await Fund(Alice, 100m);
             var storeIds = new[] { "sa", "sb" }.Take(stores).ToArray();
 
@@ -215,8 +205,7 @@ namespace deltanium_api.Tests.Services
             r.Ok.Should().BeTrue();
             (100m - await _wallet.GetBalanceAsync(Alice)).Should().Be(charge.OwnerPays);
             r.Escrow!.StoreNodeIds.Count.Should().Be(stores);
-            if (social) charge.OwnerPays.Should().Be(0);
-            else charge.OwnerPays.Should().Be(Math.Round(Math.Max(1m, _econ.MonthlyStorageFee(size, charge.Replicas) * 12), 4, MidpointRounding.AwayFromZero));
+            charge.OwnerPays.Should().Be(Math.Round(Math.Max(1m, _econ.MonthlyStorageFee(size, charge.Replicas) * 12), 4, MidpointRounding.AwayFromZero));
             (charge.OwnerPays * 10_000m % 1m).Should().Be(0m); // whole 0.0001 D
         }
 
@@ -225,8 +214,6 @@ namespace deltanium_api.Tests.Services
         {
             await Build(enforceFees: true, new()
             {
-                ["Economics:FreeTier:StorageBytes"] = "0",
-                ["Economics:FreeTier:SocialMonthlyBytes"] = "0",
                 ["Economics:Storage:MinContractFee"] = "0.1",
                 ["Economics:Storage:PricePerGbMonth"] = "200",
             });
@@ -259,66 +246,19 @@ namespace deltanium_api.Tests.Services
         }
 
         [Fact]
-        public async Task With_no_social_allowance_a_like_is_billed_like_any_item()
+        public async Task A_like_is_billed_like_any_item()
         {
-            await Build(enforceFees: true, new()
-            {
-                ["Economics:FreeTier:StorageBytes"] = "0",
-                ["Economics:FreeTier:SocialMonthlyBytes"] = "0",
-                ["Economics:Storage:MinContractFee"] = "1",
-            });
+            await Build(enforceFees: true, new() { ["Economics:Storage:MinContractFee"] = "1" });
             await Fund(Alice, 10m);
 
             var charge = await _econ.QuoteChargeAsync(Alice, 600, 1, 2, 12, social: true);
-            charge.Social.Should().BeFalse();
             charge.OwnerPays.Should().Be(1m);
             (await _econ.QuoteChargeAsync(null, 600, 1, 2, 12, social: true)).OwnerPays.Should().Be(1m); // no owner given
 
             var like = await _econ.OpenStorageEscrowAsync(Alice, "like1", 600, new[] { "sa" }, 12, null, null, social: true, replicas: 2);
             like.Ok.Should().BeTrue();
-            like.Escrow!.Social.Should().BeFalse();
-            like.Escrow.PayerAccount.Should().Be(Alice);
+            like.Escrow!.PayerAccount.Should().Be(Alice);
             (await _wallet.GetBalanceAsync(Alice)).Should().Be(9m);
-        }
-
-        [Fact]
-        public async Task Free_tier_pays_for_actual_bytes_without_the_minimum_fee()
-        {
-            await Fund(EconAccounts.NetworkFund, 1_000m);
-            var r = await _econ.OpenStorageEscrowAsync(Alice, "like1", 600, new[] { "sa", "sb" }, 12, null, null, social: true);
-            r.Ok.Should().BeTrue();
-            r.Escrow!.FreeTier.Should().BeTrue();
-            r.Escrow.TotalFunded.Should().BeLessThan(0.02m); // 1,200 B × 800 D/GB × 12 mo, not 10 D
-            (await _econ.GetFreeTierUsedBytesAsync(Alice)).Should().Be(1200);
-        }
-
-        [Fact]
-        public async Task Social_items_are_never_charged_to_the_owner()
-        {
-            // Bob has no email, so no free tier: a reaction is recorded unfunded instead of costing 10 D.
-            var r = await _econ.OpenStorageEscrowAsync(Bob, "like2", 600, new[] { "sa" }, 12, null, null, social: true);
-            r.Ok.Should().BeTrue();
-            r.Escrow!.Social.Should().BeTrue();
-            r.Escrow.TotalFunded.Should().Be(0);
-
-            // A large item cannot use the social exemption.
-            var big = await _econ.OpenStorageEscrowAsync(Bob, "big", EconomicsService.SocialItemMaxBytes + 1, new[] { "sa" }, 12, null, null, social: true);
-            big.Ok.Should().BeFalse();
-            big.Status.Should().Be(402);
-        }
-
-        [Fact]
-        public async Task Social_exemption_stops_at_the_monthly_budget()
-        {
-            await Build(enforceFees: true, new() { ["Economics:FreeTier:SocialMonthlyBytes"] = "1000" });
-            var first = await _econ.OpenStorageEscrowAsync(Bob, "s1", 600, new[] { "sa" }, 12, null, null, social: true);
-            first.Ok.Should().BeTrue();
-            first.Escrow!.Social.Should().BeTrue();
-
-            // 600 + 600 > 1000: Bob (no email, no D) now has to pay like any other upload.
-            var second = await _econ.OpenStorageEscrowAsync(Bob, "s2", 600, new[] { "sa" }, 12, null, null, social: true);
-            second.Ok.Should().BeFalse();
-            second.Status.Should().Be(402);
         }
 
         [Fact]
@@ -347,27 +287,17 @@ namespace deltanium_api.Tests.Services
         }
 
         [Fact]
-        public async Task Free_tier_is_never_charged_to_the_owner_when_the_network_fund_is_empty()
+        public async Task Social_tx_is_not_sponsored_and_topup_cannot_be_submitted()
         {
-            await Fund(Alice, 1_000m); // Alice could pay, but the free tier must not cost her anything
-            var r = await _econ.OpenStorageEscrowAsync(Alice, "free-empty", 1024 * 1024, new[] { "sa" }, 12, null, Blocks());
-            r.Ok.Should().BeTrue();
-            r.Escrow!.FreeTier.Should().BeTrue();
-            r.Escrow.TotalFunded.Should().Be(0);
-            (await _wallet.GetBalanceAsync(Alice)).Should().Be(1_000m);
-            (await _econ.GetFreeTierUsedBytesAsync(Alice)).Should().Be(1024 * 1024);
-        }
+            await Fund(EconAccounts.NetworkFund, 1_000m);
+            var r = await _econ.ChargeTxFeeAsync("React", Bob, "tx-react"); // Bob has no D: refused, the fund pays nothing
+            r.Ok.Should().BeFalse();
+            r.Status.Should().Be(402);
+            (await _wallet.GetBalanceAsync(EconAccounts.NetworkFund)).Should().Be(1_000m);
 
-        [Fact]
-        public async Task Social_tx_goes_through_when_the_sponsor_fund_is_empty()
-        {
-            var r = await _econ.ChargeTxFeeAsync("React", Bob, "tx-empty-fund");
-            r.Ok.Should().BeTrue();
-            r.Fee.Should().Be(0);
-
-            var paid = await _econ.ChargeTxFeeAsync("Transfer", Bob, "tx-transfer"); // not social: Bob has no D
-            paid.Ok.Should().BeFalse();
-            paid.Status.Should().Be(402);
+            var topup = await _econ.ChargeTxFeeAsync("TopUp", Bob, "tx-topup");
+            topup.Ok.Should().BeFalse();
+            topup.Status.Should().Be(403);
         }
 
         [Fact]
@@ -410,8 +340,6 @@ namespace deltanium_api.Tests.Services
 
         private Task MonthlyPricing() => Build(enforceFees: true, new()
         {
-            ["Economics:FreeTier:StorageBytes"] = "0",
-            ["Economics:FreeTier:SocialMonthlyBytes"] = "0",
             ["Economics:Storage:MinContractFee"] = "0.1",
             ["Economics:Storage:PricePerGbMonth"] = "200",
             ["Economics:Storage:ConvertPrepaidBefore"] = "2100-01-01",
@@ -590,16 +518,21 @@ namespace deltanium_api.Tests.Services
         // ---------- §7 bandwidth ----------
 
         [Fact]
-        public async Task Egress_over_quota_is_charged_to_owner_and_paid_to_serving_store()
+        public async Task Every_byte_served_is_charged_to_owner_and_paid_to_serving_store()
         {
             await Fund(Alice, 1_000_000m);
-            var size = 100L * 1024 * 1024; // 100 MB → quota 10 × size / month
+            var size = 100L * 1024 * 1024;
             (await _econ.OpenStorageEscrowAsync(Alice, "f4", size, new[] { "sa" }, 12, null, Blocks())).Ok.Should().BeTrue();
             var before = await _wallet.GetBalanceAsync(Alice);
 
-            await _econ.RecordEgressAsync("sa", StoreA, "f4", 10 * size + 1024L * 1024 * 1024, DateTime.UtcNow); // exactly 1 GiB over
+            // No free reads: the first read is charged.
+            await _econ.RecordEgressAsync("sa", StoreA, "f4", 1024L * 1024 * 1024, DateTime.UtcNow); // 1 GiB
             (await _wallet.GetBalanceAsync(Alice)).Should().Be(before - 300m);
             (await _wallet.GetBalanceAsync(StoreA)).Should().Be(255m); // 85%
+
+            // A small read of a small item is charged too, and only once per byte.
+            await _econ.RecordEgressAsync("sa", StoreA, "f4", 2048, DateTime.UtcNow);
+            (await _wallet.GetBalanceAsync(Alice)).Should().Be(before - 300m - Math.Round(2048m / (1024m * 1024m * 1024m) * 300m, 10));
         }
 
         [Fact]
@@ -716,36 +649,27 @@ namespace deltanium_api.Tests.Services
             (await _wallet.GetBalanceAsync(StoreA)).Should().Be(150_000m);
         }
 
-        // ---------- §10 tx fees ----------
+        // ---------- §5 tx fees ----------
 
         [Fact]
-        public async Task Social_tx_is_sponsored_and_transfer_is_paid_by_sender()
+        public async Task Every_tx_is_paid_by_its_sender()
         {
             await Fund(EconAccounts.NetworkFund, 100m);
             await Fund(Alice, 100m);
 
             var follow = await _econ.ChargeTxFeeAsync("Follow", Alice, "t1");
             follow.Ok.Should().BeTrue();
-            follow.Payer.Should().Be(EconAccounts.NetworkFund);
-            (await _wallet.GetBalanceAsync(Alice)).Should().Be(100m);
+            follow.Payer.Should().Be(Alice);
+            (await _wallet.GetBalanceAsync(Alice)).Should().Be(99m);
+            (await _wallet.GetBalanceAsync(EconAccounts.NetworkFund)).Should().Be(100.1m); // gets its 10% share, pays nothing
 
             var transfer = await _econ.ChargeTxFeeAsync("Transfer", Alice, "t2");
             transfer.Payer.Should().Be(Alice);
-            (await _wallet.GetBalanceAsync(Alice)).Should().Be(99m);
+            (await _wallet.GetBalanceAsync(Alice)).Should().Be(98m);
             (await _wallet.GetBalanceAsync(EconAccounts.BlockerFeePool)).Should().Be(1.6m);
 
             (await _econ.PayoutBlockerPoolAsync(Blocker)).Should().Be(1.6m);
             (await _wallet.GetBalanceAsync(Blocker)).Should().Be(1.6m);
-        }
-
-        [Fact]
-        public async Task Social_actions_are_rate_limited()
-        {
-            await Build(enforceFees: false, new() { ["Economics:FreeTier:SocialTxPerHour"] = "2" });
-            var who = "rate-" + Guid.NewGuid().ToString("N");
-            (await _econ.ChargeTxFeeAsync("React", who, "1")).Ok.Should().BeTrue();
-            (await _econ.ChargeTxFeeAsync("React", who, "2")).Ok.Should().BeTrue();
-            (await _econ.ChargeTxFeeAsync("React", who, "3")).Status.Should().Be(429);
         }
 
         // ---------- §11 anchors ----------
